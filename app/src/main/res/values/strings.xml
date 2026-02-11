@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">Rexray_vision</string>
+    <string name="capture">Capture</string>
+    <string name="stop">Stop</string>
+    <string name="new_project">New Project</string>
+    <string name="project_name_format">Project: %1$s</string>
+    <string name="settings">Settings</string>
+    <string name="iso">ISO</string>
+    <string name="shutter_speed">Shutter Speed (1/x s)</string>
+    <string name="iso_value_format">%d</string>
+    <string name="shutter_speed_value_format">1/%d s</string>
+    <string name="capture_limit">Capture Limit</string>
+    <string name="capture_count_format">Count: %d</string>
+    <string name="permissions_required">Camera permissions are required to use this app.</string>
+    <string name="capture_rate">Capture Rate (fps)</string>
+    <string name="capture_rate_format">%d fps</string>
+    <string name="analyze_iso">Analyze ISO</string>
+</resources>
