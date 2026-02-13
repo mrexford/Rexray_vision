@@ -4,16 +4,21 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.* 
 import android.hardware.camera2.*
 import android.media.Image
 import android.media.ImageReader
+import android.net.nsd.NsdServiceInfo
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.StatFs
 import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
@@ -23,17 +28,19 @@ import android.view.LayoutInflater
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
+import android.view.ViewGroup
 import android.widget.*
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.constraintlayout.widget.Group
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
-import java.io.FileOutputStream
-import java.nio.ByteBuffer
+import java.io.File
+import java.io.IOException
+import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.*
-import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -62,6 +69,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var captureLimitValueTextView: TextView
     private lateinit var analyzeSceneButton: Button
     private lateinit var histogramView: HistogramView
+    private lateinit var armButton: Button
+
+    // Networking UI
+    private lateinit var roleRadioGroup: RadioGroup
+    private lateinit var primaryRadioButton: RadioButton
+    private lateinit var clientRadioButton: RadioButton
+    private lateinit var discoverButton: Button
+    private lateinit var serviceListView: ListView
+    private lateinit var clientListView: ListView
+    private lateinit var connectedClientsHeader: TextView
+    private lateinit var primaryControls: Group
 
     private var cameraDevice: CameraDevice? = null
     private var cameraCaptureSession: CameraCaptureSession? = null
@@ -85,12 +103,21 @@ class MainActivity : AppCompatActivity() {
     private var captureRate = 10
     private var captureLimit = 20
     private var isAnalyzing = false
+    private var isArmed = false
     private val capturedImageCount = AtomicInteger(0)
     private lateinit var previewSize: Size
     private var exposureAnalysisStrategy: ExposureAnalysisStrategy = HistogramEttrAnalysisStrategy()
     private var analysisPasses = 0
     private val maxAnalysisPasses = 6
     private val targetBrightness = 240
+
+    private lateinit var networkManager: NetworkManager
+    private val discoveredServices = mutableListOf<NsdServiceInfo>()
+    private lateinit var serviceListAdapter: ArrayAdapter<String>
+    private val clientStatusMap = ConcurrentHashMap<String, ClientStatus>()
+    private lateinit var clientStatusAdapter: ClientStatusAdapter
+
+    data class ClientStatus(val socket: Socket, var imageCount: Int, var batteryLevel: Int, var storageSpace: Long, var isArmed: Boolean = false)
 
     private val cameraManager by lazy {
         getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -103,6 +130,10 @@ class MainActivity : AppCompatActivity() {
         while (!Thread.currentThread().isInterrupted) {
             try {
                 val image = imageQueue.take()
+                if (cameraDevice == null) {
+                    image.close()
+                    continue
+                }
                 val characteristics = cameraManager.getCameraCharacteristics(cameraDevice!!.id)
                 captureResult?.let { result ->
                     val dngCreator = DngCreator(characteristics, result)
@@ -140,11 +171,13 @@ class MainActivity : AppCompatActivity() {
     private val cameraStateCallback = object : CameraDevice.StateCallback() {
         override fun onOpened(camera: CameraDevice) {
             cameraDevice = camera
-            runOnUiThread { 
-                permissionsTextView.visibility = View.GONE
-                setupSettingsControls()
+            if (cameraDevice != null) {
+                runOnUiThread { 
+                    permissionsTextView.visibility = View.GONE
+                    setupSettingsControls()
+                }
+                createCameraPreviewSession()
             }
-            createCameraPreviewSession()
         }
         override fun onDisconnected(camera: CameraDevice) {
             camera.close()
@@ -177,6 +210,18 @@ class MainActivity : AppCompatActivity() {
         captureLimitValueTextView = findViewById(R.id.captureLimitValueTextView)
         analyzeSceneButton = findViewById(R.id.analyzeSceneButton)
         histogramView = findViewById(R.id.histogramView)
+        armButton = findViewById(R.id.armButton)
+        armButton.contentDescription = getString(R.string.arm_button_description)
+
+        // Networking UI
+        roleRadioGroup = findViewById(R.id.roleRadioGroup)
+        primaryRadioButton = findViewById(R.id.primaryRadioButton)
+        clientRadioButton = findViewById(R.id.clientRadioButton)
+        discoverButton = findViewById(R.id.discoverButton)
+        serviceListView = findViewById(R.id.serviceListView)
+        clientListView = findViewById(R.id.clientListView)
+        connectedClientsHeader = findViewById(R.id.connectedClientsHeader)
+        primaryControls = findViewById(R.id.primaryControls)
 
         setupNewProject()
         generateCameraName()
@@ -185,22 +230,251 @@ class MainActivity : AppCompatActivity() {
         newProjectButton.setOnClickListener { if (!isCapturing) setupNewProject() }
         captureButton.setOnClickListener { if (isCapturing) stopBurstCapture() else startBurstCapture() }
         analyzeSceneButton.setOnClickListener { if (cameraDevice != null) analyzeScene() }
+        armButton.setOnClickListener { armCapture() }
+
+        setupNetworking()
+        updateArmingState() // Set initial button states
+    }
+
+    override fun onStart() {
+        super.onStart()
+        startBackgroundThread()
+        startImageSaver()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isCapturing) stopBurstCapture()
+        networkManager.unregisterService()
+        networkManager.stopDiscovery()
+        closeCamera()
+        stopImageSaver()
+        stopBackgroundThread()
     }
 
     override fun onResume() {
         super.onResume()
-        startBackgroundThread()
-        startImageSaver()
         if (textureView.isAvailable) checkPermissionsAndOpenCamera(textureView.width, textureView.height)
         else textureView.surfaceTextureListener = textureListener
     }
 
     override fun onPause() {
         super.onPause()
-        if (isCapturing) stopBurstCapture()
-        closeCamera()
-        stopImageSaver()
-        stopBackgroundThread()
+    }
+
+    private fun setupNetworking() {
+        networkManager = NetworkManager(this)
+        serviceListAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf<String>())
+        serviceListView.adapter = serviceListAdapter
+        clientStatusAdapter = ClientStatusAdapter(this, mutableListOf())
+        clientListView.adapter = clientStatusAdapter
+
+        roleRadioGroup.setOnCheckedChangeListener { _, checkedId ->
+            if (checkedId == R.id.primaryRadioButton) {
+                primaryControls.visibility = View.VISIBLE
+                discoverButton.visibility = View.GONE
+                serviceListView.visibility = View.GONE
+                connectedClientsHeader.visibility = View.VISIBLE
+                clientListView.visibility = View.VISIBLE
+                networkManager.registerService(8080)
+                networkManager.stopDiscovery()
+            } else {
+                primaryControls.visibility = View.GONE
+                discoverButton.visibility = View.VISIBLE
+                serviceListView.visibility = View.VISIBLE
+                connectedClientsHeader.visibility = View.GONE
+                clientListView.visibility = View.GONE
+                networkManager.unregisterService()
+            }
+            updateArmingState()
+        }
+
+        discoverButton.setOnClickListener {
+            discoveredServices.clear()
+            serviceListAdapter.clear()
+            serviceListAdapter.notifyDataSetChanged()
+            networkManager.discoverServices()
+        }
+
+        serviceListView.onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->
+            val service = discoveredServices[position]
+            networkManager.resolveService(service)
+        }
+
+        networkManager.onServiceFound = { serviceInfo: NsdServiceInfo ->
+            if (!discoveredServices.any { it.serviceName == serviceInfo.serviceName }) {
+                discoveredServices.add(serviceInfo)
+                runOnUiThread {
+                    serviceListAdapter.add(serviceInfo.serviceName)
+                    serviceListAdapter.notifyDataSetChanged()
+                }
+            }
+        }
+
+        networkManager.onServiceLost = { serviceInfo: NsdServiceInfo ->
+            discoveredServices.removeAll { it.serviceName == serviceInfo.serviceName }
+            runOnUiThread {
+                serviceListAdapter.remove(serviceInfo.serviceName)
+                serviceListAdapter.notifyDataSetChanged()
+            }
+        }
+
+        networkManager.onServiceResolved = { serviceInfo: NsdServiceInfo ->
+            if (serviceInfo.hostAddresses.isNotEmpty()) {
+                val host = serviceInfo.hostAddresses[0]
+                val port = serviceInfo.port
+                runOnUiThread {
+                    Toast.makeText(this, "Connected to ${serviceInfo.serviceName} at ${host.hostAddress}:$port", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        networkManager.onClientConnected = { client ->
+            val address = client.inetAddress.hostAddress
+            val status = ClientStatus(client, 0, getBatteryLevel(), getAvailableStorage(), false)
+            clientStatusMap[address] = status
+            runOnUiThread {
+                clientStatusAdapter.add(status)
+                clientStatusAdapter.notifyDataSetChanged()
+                updateArmingState() // A new client joined, re-evaluate arming state
+            }
+            // Send current params to new client
+            val params = NetworkManager.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName)
+            networkManager.sendMessage(client, params)
+
+            if(isArmed) {
+                networkManager.sendMessage(client, NetworkManager.Message.ArmCapture)
+            }
+        }
+
+        networkManager.onClientDisconnected = { client ->
+            val address = client.inetAddress.hostAddress
+            val status = clientStatusMap.remove(address)
+            runOnUiThread {
+                if(status != null) {
+                    clientStatusAdapter.remove(status)
+                    clientStatusAdapter.notifyDataSetChanged()
+                }
+                updateArmingState() // A client left, re-evaluate arming state
+            }
+        }
+
+        networkManager.onMessageReceived = { socket, message ->
+            runOnUiThread {
+                val address = socket.inetAddress.hostAddress
+                when (message) {
+                    is NetworkManager.Message.SetParams -> {
+                        shutterSpeed = message.shutterSpeed
+                        iso = message.iso
+                        captureLimit = message.captureCount
+                        currentProjectName = message.projectName
+                        updateUIFromNetwork()
+                    }
+                    is NetworkManager.Message.ArmCapture -> armCapture()
+                    is NetworkManager.Message.StartCapture -> startBurstCapture()
+                    is NetworkManager.Message.StatusUpdate -> {
+                        val status = clientStatusMap[address]
+                        if (status != null) {
+                            status.imageCount = message.imageCount
+                            status.batteryLevel = message.batteryLevel
+                            status.storageSpace = message.storageSpace
+                            status.isArmed = message.isArmed
+                            clientStatusAdapter.notifyDataSetChanged()
+                            updateArmingState()
+                        }
+                    }
+                    is NetworkManager.Message.JoinGroup -> { /* Already handled by onClientConnected */ }
+                }
+            }
+        }
+        
+        // Set initial state
+        roleRadioGroup.check(R.id.primaryRadioButton)
+    }
+
+    private fun broadcastMessage(message: NetworkManager.Message) {
+        clientStatusMap.values.forEach { networkManager.sendMessage(it.socket, message) }
+    }
+
+    private fun updateUIFromNetwork() {
+        shutterSpeedValueTextView.text = getString(R.string.shutter_speed_value_format, 1_000_000_000L / shutterSpeed)
+        isoValueTextView.text = iso.toString()
+        captureLimitValueTextView.text = captureLimit.toString()
+        projectNameTextView.text = getString(R.string.project_name_format, currentProjectName)
+    }
+
+    private fun armCapture() {
+        if (primaryRadioButton.isChecked) {
+            isArmed = true
+            broadcastMessage(NetworkManager.Message.ArmCapture)
+        } else { // Client
+            isArmed = true
+            val batteryLevel = getBatteryLevel()
+            val storageSpace = getAvailableStorage()
+            val status = NetworkManager.Message.StatusUpdate(capturedImageCount.get(), batteryLevel, storageSpace, isArmed)
+            networkManager.sendMessageToPrimary(status)
+        }
+        updateArmingState()
+    }
+
+    private fun updateArmingState() {
+        val allClientsArmed = clientStatusMap.values.all { it.isArmed }
+        val isPrimary = primaryRadioButton.isChecked
+
+        runOnUiThread {
+            if (isPrimary) {
+                val areClientsConnected = clientStatusMap.isNotEmpty()
+                if (isArmed) {
+                    when {
+                        !areClientsConnected -> { // No clients, can arm and capture locally
+                            armButton.text = "Armed"
+                            armButton.isEnabled = false
+                            captureButton.isEnabled = true
+                        }
+                        allClientsArmed -> { // All clients connected and armed
+                            armButton.text = "Armed"
+                            armButton.isEnabled = false
+                            captureButton.isEnabled = true
+                        }
+                        else -> { // Clients are connected but not all are armed
+                            armButton.text = "Syncing..."
+                            armButton.isEnabled = false
+                            captureButton.isEnabled = false
+                        }
+                    }
+                } else { // Not armed
+                    armButton.text = "Arm"
+                    armButton.isEnabled = true // Always allow arming in primary mode
+                    captureButton.isEnabled = false
+                }
+            } else { // Client
+                armButton.text = if (isArmed) "Armed" else "Arm"
+                armButton.isEnabled = !isArmed
+                captureButton.isEnabled = false
+            }
+        }
+    }
+
+    private fun getBatteryLevel(): Int {
+        val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        return if (level != -1 && scale != -1) (level * 100 / scale.toFloat()).toInt() else -1
+    }
+
+    private fun getAvailableStorage(): Long {
+        return try {
+            val path = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "Rexray_vision")
+            if (!path.exists()) {
+                path.mkdirs()
+            }
+            val stat = StatFs(path.absolutePath)
+            val availableBytes = stat.availableBytes
+            availableBytes / (1024 * 1024) // Return in MB
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get storage stats", e)
+            -1L
+        }
     }
 
     private fun checkPermissionsAndOpenCamera(width: Int, height: Int) {
@@ -323,6 +597,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startBurstCapture() {
+        if (primaryRadioButton.isChecked && clientStatusMap.isNotEmpty() && !clientStatusMap.values.all { it.isArmed }) {
+            runOnUiThread { Toast.makeText(this, "Not all clients are armed", Toast.LENGTH_SHORT).show() }
+            return // Don't start capture if not all clients are armed
+        }
+
+        if (primaryRadioButton.isChecked) {
+            broadcastMessage(NetworkManager.Message.StartCapture)
+        }
         capturedImageCount.set(0)
         updateCaptureCount(0)
         runOnUiThread { captureBorder.visibility = View.VISIBLE }
@@ -355,7 +637,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopBurstCapture() {
         isCapturing = false
-        runOnUiThread { captureBorder.visibility = View.GONE }
+        isArmed = false
+        runOnUiThread { 
+            captureBorder.visibility = View.GONE 
+            updateArmingState()
+        }
         try {
             cameraCaptureSession?.abortCaptures()
             cameraCaptureSession?.stopRepeating()
@@ -393,7 +679,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupNewProject(){
         currentProjectName = "${adjectives.random()}-${nouns.random()}"
-        runOnUiThread { projectNameTextView.text = getString(R.string.project_name_format, currentProjectName) }
+        runOnUiThread { 
+            projectNameTextView.text = getString(R.string.project_name_format, currentProjectName)
+            updateArmingState()
+        }
+        if (primaryRadioButton.isChecked) {
+            broadcastMessage(NetworkManager.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
+        }
     }
 
     @SuppressLint("HardwareIds")
@@ -402,6 +694,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupSettingsControls() {
+        if (cameraDevice == null) return
         val characteristics = cameraManager.getCameraCharacteristics(cameraDevice!!.id)
         val isoRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: Range(50, 800)
         val exposureNs = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) ?: Range(200000L, 16666666L)
@@ -413,7 +706,12 @@ class MainActivity : AppCompatActivity() {
         isoValueTextView.text = iso.toString()
 
         isoSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar, p: Int, fromUser: Boolean) { isoValueTextView.text = p.toString(); iso = p; updatePreview() }
+            override fun onProgressChanged(seekBar: SeekBar, p: Int, fromUser: Boolean) {
+                isoValueTextView.text = p.toString(); iso = p; updatePreview()
+                if (fromUser && primaryRadioButton.isChecked) {
+                    broadcastMessage(NetworkManager.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
+                }
+            }
             override fun onStartTrackingTouch(s: SeekBar) {}
             override fun onStopTrackingTouch(s: SeekBar) {}
         })
@@ -432,6 +730,9 @@ class MainActivity : AppCompatActivity() {
                 shutterSpeedValueTextView.text = getString(R.string.shutter_speed_value_format, value)
                 shutterSpeed = 1_000_000_000L / value
                 updatePreview()
+                 if (fromUser && primaryRadioButton.isChecked) {
+                     broadcastMessage(NetworkManager.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
+                 }
             }
             override fun onStartTrackingTouch(s: SeekBar) {}
             override fun onStopTrackingTouch(s: SeekBar) {}
@@ -462,7 +763,14 @@ class MainActivity : AppCompatActivity() {
         captureLimitValueTextView.text = captureLimit.toString()
 
         captureLimitSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) { if (p>0) { captureLimitValueTextView.text = p.toString(); captureLimit = p } }
+            override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) { 
+                if (p>0) { 
+                    captureLimitValueTextView.text = p.toString(); captureLimit = p 
+                    if (fromUser && primaryRadioButton.isChecked) {
+                        broadcastMessage(NetworkManager.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
+                    }
+                }
+            }
             override fun onStartTrackingTouch(s: SeekBar) {}
             override fun onStopTrackingTouch(s: SeekBar) {}
         })
@@ -555,6 +863,20 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun updateCaptureCount(count: Int) { runOnUiThread { captureCountTextView.text = getString(R.string.capture_count_format, count) } }
+
+    inner class ClientStatusAdapter(context: Context, private val dataSource: MutableList<ClientStatus>) : ArrayAdapter<ClientStatus>(context, R.layout.client_status_item, dataSource) {
+        @SuppressLint("ViewHolder")
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val view = LayoutInflater.from(context).inflate(R.layout.client_status_item, parent, false)
+            val addressTextView = view.findViewById<TextView>(R.id.clientAddressTextView)
+            val statusTextView = view.findViewById<TextView>(R.id.clientStatusTextView)
+            val status = getItem(position)
+            addressTextView.text = status?.socket?.inetAddress?.hostAddress
+            val armedStatus = if(status?.isArmed == true) "Armed" else "Disarmed"
+            statusTextView.text = "Images: ${status?.imageCount}, Bat: ${status?.batteryLevel}%, Space: ${status?.storageSpace}MB, $armedStatus"
+            return view
+        }
+    }
 
     companion object {
         private const val REQUEST_CAMERA_PERMISSION = 200

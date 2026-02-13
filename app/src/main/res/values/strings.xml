@@ -15,4 +15,10 @@
     <string name="capture_rate">Capture Rate (fps)</string>
     <string name="capture_rate_format">%d fps</string>
     <string name="analyze_iso">Analyze ISO</string>
+    <string name="primary">Primary</string>
+    <string name="client">Client</string>
+    <string name="discover">Discover</string>
+    <string name="connected_clients">Connected Clients</string>
+    <string name="arm">Arm</string>
+    <string name="arm_button_description">Prepares the camera for a low-latency synchronized capture.</string>
 </resources>
