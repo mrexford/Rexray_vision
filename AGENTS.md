@@ -16,6 +16,14 @@
 
 - **Multi-step Tasks:** You may perform multi-step tasks as long as each step is a direct and logical progression toward the explicitly assigned goal.
 
+- **Workplan System:** All new tasks must be added to the `WORKPLAN.md` file. Once a task is completed, it must be moved to the `COMPLETED_WORK.md` file.
+
+- **Completed Work:** When moving tasks to `COMPLETED_WORK.md`, they must be marked with `[x]` and must never be removed or altered.
+
+- **Analysis-Only Mode:** When I say "analysis only," you must only provide analysis and not change any files or execute any code.
+
+- **Deployment:** Never deploy the builds to devices. Always build them to ensure they compile, but the user will handle deployment.
+
 # Project Goal: High-Speed Photogrammetry Rig
 
 - Target: Google Pixel 6 and newer.

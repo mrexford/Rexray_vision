@@ -21,4 +21,8 @@
     <string name="connected_clients">Connected Clients</string>
     <string name="arm">Arm</string>
     <string name="arm_button_description">Prepares the camera for a low-latency synchronized capture.</string>
+    <string name="project_name_label">Project:</string>
+    <string name="camera_name_label">Camera:</string>
+    <string name="regenerate_camera_name_description">Regenerate Camera Name</string>
+    <string name="client_mode">Client Mode</string>
 </resources>

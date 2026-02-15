@@ -8,37 +8,41 @@ import com.google.gson.TypeAdapterFactory
 import com.google.gson.reflect.TypeToken
 import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonWriter
-import java.io.IOException
 
 class MessageTypeAdapterFactory : TypeAdapterFactory {
     override fun <T : Any?> create(gson: Gson, type: TypeToken<T>): TypeAdapter<T>? {
-        if (type.rawType != NetworkManager.Message::class.java) {
+        if (!NetworkService.Message::class.java.isAssignableFrom(type.rawType)) {
             return null
         }
 
-        val delegateAdapter = gson.getDelegateAdapter(this, type)
-        val elementAdapter = gson.getAdapter(JsonElement::class.java)
+        val delegate = gson.getDelegateAdapter(this, type)
 
         return object : TypeAdapter<T>() {
             override fun write(out: JsonWriter, value: T) {
-                val jsonObject = delegateAdapter.toJsonTree(value).asJsonObject
+                val jsonObject = delegate.toJsonTree(value).asJsonObject
                 jsonObject.addProperty("type", value!!::class.java.simpleName)
-                elementAdapter.write(out, jsonObject)
+                gson.toJson(jsonObject, out)
             }
 
-            override fun read(`in`: JsonReader): T {
-                val jsonObject = elementAdapter.read(`in`).asJsonObject
-                val typeName = jsonObject.remove("type").asString
-                val actualType = when (typeName) {
-                    "SetParams" -> NetworkManager.Message.SetParams::class.java
-                    "ArmCapture" -> NetworkManager.Message.ArmCapture::class.java
-                    "StartCapture" -> NetworkManager.Message.StartCapture::class.java
-                    "StatusUpdate" -> NetworkManager.Message.StatusUpdate::class.java
-                    "JoinGroup" -> NetworkManager.Message.JoinGroup::class.java
-                    else -> throw IOException("Unknown type: $typeName")
+            override fun read(`in`: JsonReader): T? {
+                val jsonObject = gson.fromJson<JsonElement>(`in`, JsonElement::class.java).asJsonObject
+                val typeName = jsonObject.get("type").asString
+
+                val messageClass = when (typeName) {
+                    "SetParams" -> NetworkService.Message.SetParams::class.java
+                    "ArmCapture" -> NetworkService.Message.ArmCapture::class.java
+                    "DisarmCapture" -> NetworkService.Message.DisarmCapture::class.java
+                    "StartCapture" -> NetworkService.Message.StartCapture::class.java
+                    "StatusUpdate" -> NetworkService.Message.StatusUpdate::class.java
+                    "UpdateCameraName" -> NetworkService.Message.UpdateCameraName::class.java
+                    "JoinGroup" -> NetworkService.Message.JoinGroup::class.java
+                    "LeaveGroup" -> NetworkService.Message.LeaveGroup::class.java
+                    else -> throw IllegalArgumentException("Unknown message type: $typeName")
                 }
-                return gson.fromJson(jsonObject, actualType) as T
+
+                val delegateAdapter = gson.getDelegateAdapter(this@MessageTypeAdapterFactory, TypeToken.get(messageClass))
+                return delegateAdapter.fromJsonTree(jsonObject) as? T
             }
-        }.nullSafe()
+        }
     }
 }
