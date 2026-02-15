@@ -7,49 +7,45 @@ import android.graphics.Paint
 import android.util.AttributeSet
 import android.view.View
 
-class HistogramView @JvmOverloads constructor(
-    context: Context,
-    attrs: AttributeSet? = null,
-    defStyleAttr: Int = 0
-) : View(context, attrs, defStyleAttr) {
+class HistogramView(context: Context, attrs: AttributeSet) : View(context, attrs) {
 
     private var histogram = IntArray(256)
-    private val paint = Paint()
-    private val linePaint = Paint()
-    private var maxCount = 1
+    private val barPaint = Paint()
+    private val backgroundPaint = Paint()
+    private val textPaint = Paint()
+    private var maxVal = 1
 
     init {
-        paint.color = Color.argb(180, 100, 100, 100)
-        linePaint.color = Color.argb(200, 255, 255, 255)
-        linePaint.strokeWidth = 1f
+        barPaint.color = Color.WHITE
+        barPaint.strokeWidth = 2f
+        backgroundPaint.color = Color.argb(128, 0, 0, 0)
+        textPaint.color = Color.WHITE
+        textPaint.textSize = 24f
     }
 
     fun updateHistogram(newHistogram: IntArray) {
-        if (newHistogram.size == 256) {
-            histogram = newHistogram
-            maxCount = histogram.maxOrNull() ?: 1
-            postInvalidate() // Redraw the view
-        }
+        histogram = newHistogram
+        maxVal = histogram.maxOrNull() ?: 1
+        postInvalidate() 
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        val viewWidth = width.toFloat()
-        val viewHeight = height.toFloat()
+        // Draw background
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), backgroundPaint)
 
-        // Draw a semi-transparent background
-        paint.style = Paint.Style.FILL
-        canvas.drawRect(0f, 0f, viewWidth, viewHeight, paint)
-
-        val barWidth = viewWidth / 256f
+        val width = width.toFloat()
+        val height = height.toFloat()
+        val barWidth = width / 256f
 
         for (i in 0..255) {
-            if (histogram[i] == 0) continue
-            val barHeight = (histogram[i].toFloat() / maxCount) * viewHeight
-            val x = i * barWidth
-            val y = viewHeight - barHeight
-            canvas.drawRect(x, y, x + barWidth, viewHeight, linePaint)
+            val barHeight = (histogram[i].toFloat() / maxVal) * height
+            canvas.drawRect(i * barWidth, height - barHeight, (i + 1) * barWidth, height, barPaint)
         }
+
+        canvas.drawText("R", 10f, 30f, textPaint)
+        canvas.drawText("G", 10f, 60f, textPaint)
+        canvas.drawText("B", 10f, 90f, textPaint)
     }
 }

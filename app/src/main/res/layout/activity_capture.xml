@@ -5,7 +5,7 @@
     android:id="@+id/main"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    tools:context=".MainActivity">
+    tools:context=".CaptureActivity">
 
     <TextureView
         android:id="@+id/textureView"
@@ -20,58 +20,35 @@
         android:id="@+id/histogramView"
         android:layout_width="200dp"
         android:layout_height="100dp"
-        android:layout_marginTop="16dp"
         android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <Button
-        android:id="@+id/discoverButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/discover"
-        android:visibility="gone"
-        android:layout_marginTop="16dp"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"/>
-
-    <ListView
-        android:id="@+id/serviceListView"
-        android:layout_width="0dp"
-        android:layout_height="200dp"
-        android:visibility="gone"
-        android:background="#80000000"
-        app:layout_constraintTop_toBottomOf="@id/discoverButton"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        android:layout_margin="16dp"/>
-
     <TextView
         android:id="@+id/connectedClientsHeader"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
+        android:layout_marginEnd="16dp"
+        android:background="#80000000"
+        android:gravity="center_horizontal"
+        android:padding="8dp"
         android:text="@string/connected_clients"
         android:textColor="@android:color/white"
-        android:background="#80000000"
-        android:padding="8dp"
-        android:visibility="gone"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginTop="16dp" />
+        app:layout_constraintStart_toEndOf="@id/histogramView"
+        app:layout_constraintTop_toTopOf="parent" />
 
     <ListView
         android:id="@+id/clientListView"
         android:layout_width="0dp"
-        android:layout_height="200dp"
-        android:visibility="gone"
+        android:layout_height="100dp"
         android:background="#80000000"
-        app:layout_constraintTop_toBottomOf="@id/connectedClientsHeader"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        android:layout_margin="16dp"/>
-
+        app:layout_constraintEnd_toEndOf="@id/connectedClientsHeader"
+        app:layout_constraintStart_toStartOf="@id/connectedClientsHeader"
+        app:layout_constraintTop_toBottomOf="@id/connectedClientsHeader" />
 
     <View
         android:id="@+id/captureBorder"
@@ -79,48 +56,64 @@
         android:layout_height="0dp"
         android:background="@drawable/capture_border"
         android:visibility="gone"
-        app:layout_constraintBottom_toBottomOf="@id/textureView"
-        app:layout_constraintEnd_toEndOf="@id/textureView"
-        app:layout_constraintStart_toStartOf="@id/textureView"
-        app:layout_constraintTop_toTopOf="@id/textureView" />
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
 
     <TextView
         android:id="@+id/permissionsTextView"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/permissions_required"
-        android:textColor="@android:color/white"
         android:background="#80000000"
         android:padding="8dp"
+        android:text="@string/permissions_required"
+        android:textColor="@android:color/white"
         android:visibility="gone"
-        app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
+        app:layout_constraintTop_toTopOf="parent" />
 
-    <androidx.constraintlayout.widget.Group
-        android:id="@+id/primaryControls"
+    <TextView
+        android:id="@+id/settingsDisplayTextView"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        app:constraint_referenced_ids="captureButton,newProjectButton,projectNameTextView,captureCountTextView,settingsLayout,connectedClientsHeader,clientListView,armButton" />
+        android:layout_marginStart="16dp"
+        android:layout_marginBottom="8dp"
+        android:background="#80000000"
+        android:padding="8dp"
+        android:textColor="@android:color/white"
+        app:layout_constraintBottom_toTopOf="@id/switchModeButton"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <Button
+        android:id="@+id/switchModeButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:text="@string/client_mode"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
 
     <Button
         android:id="@+id/armButton"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:text="@string/arm"
         app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toStartOf="@id/captureButton"/>
+        app:layout_constraintEnd_toStartOf="@id/guideline_right"
+        app:layout_constraintStart_toStartOf="@id/guideline_left" />
 
     <Button
         android:id="@+id/captureButton"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:text="@string/capture"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toEndOf="@id/armButton" />
+        app:layout_constraintStart_toStartOf="@id/guideline_right" />
 
     <Button
         android:id="@+id/newProjectButton"
@@ -132,56 +125,85 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
 
-    <RadioGroup
-        android:id="@+id/roleRadioGroup"
-        android:layout_width="wrap_content"
+    <LinearLayout
+        android:id="@+id/nameContainer"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:background="#80000000"
-        android:padding="4dp"
-        app:layout_constraintBottom_toTopOf="@id/newProjectButton"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginBottom="8dp">
-
-        <RadioButton
-            android:id="@+id/primaryRadioButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/primary"
-            android:textColor="@android:color/white"
-            android:checked="true"/>
-
-        <RadioButton
-            android:id="@+id/clientRadioButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="@android:color/white"
-            android:text="@string/client"/>
-    </RadioGroup>
-
-    <TextView
-        android:id="@+id/projectNameTextView"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
         android:layout_marginBottom="8dp"
         android:background="#80000000"
+        android:orientation="vertical"
         android:padding="8dp"
-        android:textColor="@android:color/white"
-        app:layout_constraintBottom_toTopOf="@id/roleRadioGroup"
+        app:layout_constraintBottom_toTopOf="@id/newProjectButton"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        tools:text="Project: Quirky-Wombat" />
+        app:layout_constraintStart_toStartOf="parent">
+
+        <LinearLayout
+            android:id="@+id/projectNameLayout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/project_name_label"
+                android:textColor="@android:color/white" />
+
+            <TextView
+                android:id="@+id/projectNameTextView"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@android:color/white"
+                tools:text="Quirky-Wombat" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/cameraNameLayout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/camera_name_label"
+                android:textColor="@android:color/white" />
+
+            <TextView
+                android:id="@+id/cameraNameTextView"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@android:color/white"
+                tools:text="Lion" />
+
+            <ImageButton
+                android:id="@+id/regenerateCameraNameButton"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_marginStart="8dp"
+                android:background="@android:drawable/ic_menu_rotate"
+                android:contentDescription="@string/regenerate_camera_name_description" />
+
+        </LinearLayout>
+    </LinearLayout>
 
     <TextView
         android:id="@+id/captureCountTextView"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
         android:layout_marginBottom="8dp"
         android:background="#80000000"
         android:padding="8dp"
         android:textColor="@android:color/white"
-        app:layout_constraintBottom_toTopOf="@id/newProjectButton"
+        app:layout_constraintBottom_toTopOf="@id/nameContainer"
         app:layout_constraintStart_toStartOf="parent"
         tools:text="Count: 0" />
 
@@ -189,31 +211,34 @@
         android:id="@+id/settingsLayout"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="8dp"
         android:background="#80000000"
+        android:orientation="vertical"
         android:padding="8dp"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintBottom_toTopOf="@id/projectNameTextView"
-        android:layout_margin="16dp">
+        app:layout_constraintBottom_toTopOf="@id/nameContainer"
+        app:layout_constraintEnd_toEndOf="parent">
 
-        <!-- ISO -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal">
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/iso"
-                android:textColor="@android:color/white"/>
+                android:textColor="@android:color/white" />
+
             <TextView
                 android:id="@+id/isoValueTextView"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:gravity="end"
                 android:textColor="@android:color/white"
-                tools:text="100"/>
+                tools:text="100" />
         </LinearLayout>
+
         <SeekBar
             android:id="@+id/isoSeekBar"
             android:layout_width="200dp"
@@ -222,26 +247,28 @@
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="@android:color/darker_gray"/>
+            android:background="@android:color/darker_gray" />
 
-        <!-- Shutter Speed -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal">
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/shutter_speed"
-                android:textColor="@android:color/white"/>
+                android:textColor="@android:color/white" />
+
             <TextView
                 android:id="@+id/shutterSpeedValueTextView"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:gravity="end"
                 android:textColor="@android:color/white"
-                tools:text="1/1000"/>
+                tools:text="1/1000" />
         </LinearLayout>
+
         <SeekBar
             android:id="@+id/shutterSpeedSeekBar"
             android:layout_width="200dp"
@@ -250,26 +277,28 @@
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="@android:color/darker_gray"/>
+            android:background="@android:color/darker_gray" />
 
-        <!-- Capture Rate -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal">
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/capture_rate"
-                android:textColor="@android:color/white"/>
+                android:textColor="@android:color/white" />
+
             <TextView
                 android:id="@+id/captureRateValueTextView"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:gravity="end"
                 android:textColor="@android:color/white"
-                tools:text="30 fps"/>
+                tools:text="30 fps" />
         </LinearLayout>
+
         <SeekBar
             android:id="@+id/captureRateSeekBar"
             android:layout_width="200dp"
@@ -278,26 +307,28 @@
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="@android:color/darker_gray"/>
+            android:background="@android:color/darker_gray" />
 
-        <!-- Capture Limit -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal">
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/capture_limit"
-                android:textColor="@android:color/white"/>
+                android:textColor="@android:color/white" />
+
             <TextView
                 android:id="@+id/captureLimitValueTextView"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:gravity="end"
                 android:textColor="@android:color/white"
-                tools:text="50"/>
+                tools:text="50" />
         </LinearLayout>
+
         <SeekBar
             android:id="@+id/captureLimitSeekBar"
             android:layout_width="200dp"
@@ -309,8 +340,22 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center"
-            android:text="@string/analyze_iso"/>
+            android:text="@string/analyze_iso" />
 
     </LinearLayout>
+
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/guideline_left"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintGuide_percent="0.33" />
+
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/guideline_right"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintGuide_percent="0.66" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
