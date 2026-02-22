@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -38,6 +40,13 @@ class SetupActivity : AppCompatActivity() {
             isBound = true
             observeDiscoveredServices()
             observeConnectionState()
+
+            if (intent.getBooleanExtra("autoDiscover", false)) {
+                Handler(Looper.getMainLooper()).postDelayed({
+                    networkService?.discoverServices()
+                    isDiscovering = true
+                }, 1000)
+            }
         }
 
         override fun onServiceDisconnected(arg0: ComponentName) {

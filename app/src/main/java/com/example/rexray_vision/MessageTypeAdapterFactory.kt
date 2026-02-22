@@ -33,10 +33,13 @@ class MessageTypeAdapterFactory : TypeAdapterFactory {
                     "ArmCapture" -> NetworkService.Message.ArmCapture::class.java
                     "DisarmCapture" -> NetworkService.Message.DisarmCapture::class.java
                     "StartCapture" -> NetworkService.Message.StartCapture::class.java
+                    "StopCapture" -> NetworkService.Message.StopCapture::class.java
                     "StatusUpdate" -> NetworkService.Message.StatusUpdate::class.java
                     "UpdateCameraName" -> NetworkService.Message.UpdateCameraName::class.java
                     "JoinGroup" -> NetworkService.Message.JoinGroup::class.java
                     "LeaveGroup" -> NetworkService.Message.LeaveGroup::class.java
+                    "CommandAck" -> NetworkService.Message.CommandAck::class.java
+                    "ConnectionRejected" -> NetworkService.Message.ConnectionRejected::class.java
                     else -> throw IllegalArgumentException("Unknown message type: $typeName")
                 }
 

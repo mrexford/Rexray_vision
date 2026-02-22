@@ -24,14 +24,19 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 class NetworkService : Service() {
 
     private val TAG = "NetworkService"
     private val nsdManager by lazy { getSystemService(Context.NSD_SERVICE) as NsdManager }
     private val serviceType = "_rexrayvision._tcp."
-    private var serviceName: String? = null
-    private val executor = Executors.newCachedThreadPool()
+    var serviceName: String? = null
+    private val numCores = Runtime.getRuntime().availableProcessors()
+    private val executor = Executors.newFixedThreadPool(numCores * 2)
+    private val scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(1)
+
     private val gson = GsonBuilder()
         .registerTypeAdapterFactory(MessageTypeAdapterFactory())
         .create()
@@ -43,11 +48,20 @@ class NetworkService : Service() {
     private var clientSocket: Socket? = null
     private var cameraName: String = ""
 
+    var currentImageCount: Int = 0
+    var isClientArmed: Boolean = false
+        set(value) {
+            if (field != value) {
+                field = value
+                updateStatusUpdateSpeed()
+            }
+        }
+
     // State Flows
     private val _discoveredServices = MutableStateFlow<List<NsdServiceInfo>>(emptyList())
     val discoveredServices = _discoveredServices.asStateFlow()
 
-    private val _connectedClients = MutableStateFlow<Map<String, ClientStatus>>(emptyMap())
+    private val _connectedClients = MutableStateFlow<Map<Socket, ClientStatus>>(emptyMap())
     val connectedClients = _connectedClients.asStateFlow()
 
     private val _incomingMessages = MutableStateFlow<Pair<Socket, Message>?>(null)
@@ -59,21 +73,23 @@ class NetworkService : Service() {
     data class ClientStatus(
         val socket: Socket,
         var imageCount: Int,
-        var batteryLevel: Int,
-        var storageSpace: Long,
         var isArmed: Boolean = false,
-        var cameraName: String = ""
+        var cameraName: String = "",
+        var lastCommandAck: Boolean = true
     )
 
     sealed class Message {
-        data class SetParams(val shutterSpeed: Long, val iso: Int, val captureCount: Int, val projectName: String) : Message()
-        object ArmCapture : Message()
-        object DisarmCapture : Message()
-        object StartCapture : Message()
-        data class StatusUpdate(val imageCount: Int, val batteryLevel: Int, val storageSpace: Long, val isArmed: Boolean, val cameraName: String) : Message()
+        data class SetParams(val shutterSpeed: Long, val iso: Int, val captureRate: Int, val captureCount: Int, val projectName: String, val commandId: String) : Message()
+        data class ArmCapture(val commandId: String) : Message()
+        data class DisarmCapture(val commandId: String) : Message()
+        data class StartCapture(val commandId: String) : Message()
+        data class StopCapture(val commandId: String) : Message()
+        data class StatusUpdate(val imageCount: Int, val isArmed: Boolean, val cameraName: String) : Message()
         data class UpdateCameraName(val name: String) : Message()
-        object JoinGroup : Message()
+        data class JoinGroup(val projectName: String) : Message()
         object LeaveGroup : Message()
+        data class CommandAck(val commandId: String) : Message()
+        object ConnectionRejected : Message()
     }
 
     inner class NetworkBinder : Binder() {
@@ -97,6 +113,7 @@ class NetworkService : Service() {
         stopDiscovery()
         unregisterService()
         executor.shutdown()
+        scheduler.shutdown()
     }
 
     fun setCameraName(name: String) {
@@ -105,16 +122,13 @@ class NetworkService : Service() {
     }
 
     fun updateClientCameraName(socket: Socket, name: String) {
-        val address = socket.inetAddress.hostAddress
-        if (address != null) {
-            _connectedClients.update { clients ->
-                val updatedClients = clients.toMutableMap()
-                val clientStatus = updatedClients[address]
-                if (clientStatus != null) {
-                    updatedClients[address] = clientStatus.copy(cameraName = name)
-                }
-                updatedClients
+        _connectedClients.update { clients ->
+            val updatedClients = clients.toMutableMap()
+            val clientStatus = updatedClients[socket]
+            if (clientStatus != null) {
+                updatedClients[socket] = clientStatus.copy(cameraName = name)
             }
+            updatedClients
         }
     }
 
@@ -133,8 +147,8 @@ class NetworkService : Service() {
 
         registrationListener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(nsdServiceInfo: NsdServiceInfo) {
-                serviceName = nsdServiceInfo.serviceName
-                Log.d(TAG, "Service registered: $serviceName on port $listeningPort")
+                this@NetworkService.serviceName = nsdServiceInfo.serviceName
+                Log.d(TAG, "Service registered: ${this@NetworkService.serviceName} on port $listeningPort")
             }
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) { Log.e(TAG, "Service registration failed: $errorCode") }
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) { Log.d(TAG, "Service unregistered: ${serviceInfo.serviceName}") }
@@ -195,6 +209,7 @@ class NetworkService : Service() {
 
     fun disconnectFromPrimary() {
         Log.i(TAG, "Disconnecting from primary")
+        stopSendingStatusUpdates()
         sendMessageToPrimary(Message.LeaveGroup)
         try {
             clientSocket?.close()
@@ -252,9 +267,10 @@ class NetworkService : Service() {
                 clientSocket = Socket()
                 clientSocket?.connect(InetSocketAddress(serviceInfo.host, serviceInfo.port), 5000)
                 Log.i(TAG, "Connected to primary. Sending JoinGroup message.")
-                sendMessageToPrimary(Message.JoinGroup)
+                sendMessageToPrimary(Message.JoinGroup(serviceInfo.serviceName))
                 _isConnectedToPrimary.value = true
                 listenForServerMessages(clientSocket!!)
+                startSendingStatusUpdates()
             } catch (e: IOException) {
                 Log.e(TAG, "Error connecting to primary", e)
                 _isConnectedToPrimary.value = false
@@ -284,6 +300,13 @@ class NetworkService : Service() {
                         Log.d(TAG, "[$serverAddress] Received line: $line")
                         val message = gson.fromJson(line, Message::class.java)
                         Log.i(TAG, "[$serverAddress] Parsed message: $message")
+
+                        if (message is Message.ConnectionRejected) {
+                            Log.w(TAG, "[$serverAddress] Connection rejected by server.")
+                            stopDiscovery()
+                            discoverServices()
+                            break
+                        }
 
                         _incomingMessages.value = Pair(socket, message)
 
@@ -331,24 +354,59 @@ class NetworkService : Service() {
 
                         when (message) {
                             is Message.JoinGroup -> {
-                                if (clientAddress != null) {
-                                    Log.i(TAG, "[$clientAddress] Client joined group.")
-                                    val status = ClientStatus(socket, 0, 0, 0, false)
-                                    _connectedClients.update { it + (clientAddress to status) }
+                                if (this.serviceName != message.projectName) {
+                                    Log.w(TAG, "[$clientAddress] Client attempted to join with stale project name. Server: ${this.serviceName}, Client: ${message.projectName}")
+                                    sendMessage(socket, Message.ConnectionRejected)
+                                    socket.close()
+                                    break
                                 }
+                                Log.i(TAG, "[$clientAddress] Client joined group.")
+                                val status = ClientStatus(socket, 0, false)
+                                _connectedClients.update { it + (socket to status) }
                             }
                             is Message.LeaveGroup -> {
                                 Log.i(TAG, "[$clientAddress] Client is leaving group.")
-                                if (clientAddress != null) {
-                                    _connectedClients.update { it - clientAddress }
-                                }
+                                _connectedClients.update { it - socket }
                                 socket.close()
                                 Log.i(TAG, "[$clientAddress] Socket closed for leaving client.")
                                 break
                             }
+                            is Message.StatusUpdate -> {
+                                _connectedClients.update { clients ->
+                                    val mutableClients = clients.toMutableMap()
+                                    val clientStatus = mutableClients[socket]
+                                    if (clientStatus != null) {
+                                        mutableClients[socket] = clientStatus.copy(
+                                            imageCount = message.imageCount,
+                                            isArmed = message.isArmed,
+                                            cameraName = message.cameraName
+                                        )
+                                    }
+                                    mutableClients
+                                }
+                            }
+                            is Message.CommandAck -> {
+                                _connectedClients.update { clients ->
+                                    val mutableClients = clients.toMutableMap()
+                                    val clientStatus = mutableClients[socket]
+                                    if (clientStatus != null) {
+                                        mutableClients[socket] = clientStatus.copy(lastCommandAck = true)
+                                    }
+                                    mutableClients
+                                }
+                            }
+                            is Message.UpdateCameraName -> {
+                                _connectedClients.update { clients ->
+                                    val mutableClients = clients.toMutableMap()
+                                    val clientStatus = mutableClients[socket]
+                                    if (clientStatus != null) {
+                                        mutableClients[socket] = clientStatus.copy(cameraName = message.name)
+                                    }
+                                    mutableClients
+                                }
+                            }
                             else -> {
-                                Log.d(TAG, "[$clientAddress] Relaying message to StateFlow.")
-                                _incomingMessages.value = Pair(socket, message)
+                                Log.e(TAG, "[$clientAddress] Received unexpected message type: $message")
                             }
                         }
                     } catch (e: JsonSyntaxException) {
@@ -361,10 +419,8 @@ class NetworkService : Service() {
             } catch (e: IOException) {
                 Log.e(TAG, "[$clientAddress] Error getting input stream", e)
             } finally {
-                if (clientAddress != null) {
-                    Log.d(TAG, "[$clientAddress] Cleaning up client connection.")
-                    _connectedClients.update { it - clientAddress }
-                }
+                Log.d(TAG, "[$clientAddress] Cleaning up client connection.")
+                _connectedClients.update { it - socket }
                 try {
                     socket.close()
                     Log.i(TAG, "[$clientAddress] Final socket closure successful.")
@@ -393,6 +449,16 @@ class NetworkService : Service() {
 
     fun broadcastMessage(message: Message) {
         Log.d(TAG, "Broadcasting message: $message")
+        _connectedClients.value.keys.forEach { socket ->
+            _connectedClients.update { clients ->
+                val mutableClients = clients.toMutableMap()
+                val clientStatus = mutableClients[socket]
+                if (clientStatus != null) {
+                    mutableClients[socket] = clientStatus.copy(lastCommandAck = false)
+                }
+                mutableClients
+            }
+        }
         _connectedClients.value.values.forEach { sendMessage(it.socket, message) }
     }
 
@@ -401,6 +467,32 @@ class NetworkService : Service() {
             Log.d(TAG, "Sending message to primary: $message")
             sendMessage(it, message) 
         }
+    }
+
+    private var statusUpdateJob: java.util.concurrent.ScheduledFuture<*>? = null
+
+    private fun startSendingStatusUpdates() {
+        if (statusUpdateJob?.isDone == false) {
+            Log.d(TAG, "Status update job already running.")
+            return
+        }
+        updateStatusUpdateSpeed() // Initial setup
+    }
+
+    private fun stopSendingStatusUpdates() {
+        statusUpdateJob?.cancel(true)
+    }
+
+    private fun updateStatusUpdateSpeed() {
+        statusUpdateJob?.cancel(true)
+        val period = if (isClientArmed) 250L else 2000L
+        statusUpdateJob = scheduler.scheduleWithFixedDelay({ sendStatusUpdate() }, 0, period, TimeUnit.MILLISECONDS)
+        Log.d(TAG, "Status update speed changed to $period ms")
+    }
+
+    fun sendStatusUpdate() {
+        val message = Message.StatusUpdate(currentImageCount, isClientArmed, cameraName)
+        sendMessageToPrimary(message)
     }
     
     private fun createNotificationChannel() {

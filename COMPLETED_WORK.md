@@ -2,6 +2,82 @@
 
 This document archives all completed tasks for the project.
 
+- [x] **Task 1: Resolve Lifecycle and Threading Issues**
+    - **Symptom:** Critical `RejectedExecutionException` in the finalizer and `IllegalStateException` for messages to a dead thread, causing instability and crashes.
+    - **Analysis:** The root cause is a race condition between the `Activity` lifecycle and background threads. The `onStop()` method terminates executors before dependent operations (like camera finalization) have completed.
+    - **Action:** Overhaul the threading model in `CaptureActivity.kt` to be lifecycle-aware. Enforce a strict, ordered shutdown of the camera session and its executors within `onStop()` to prevent race conditions.
+
+- [x] **Task 2: Fix `CommandAck` Failure and Stale Connection Handling**
+    - **Symptom:** Client fails to send `CommandAck` messages, and the server does not reject stale connections, leading to a desynchronized state.
+    - **Analysis:** The lifecycle crashes from Task 1 are preventing the `CommandAck` from being sent. Additionally, the client does not gracefully handle the server's rejection of a stale `projectName`.
+    - **Action:** 
+        1. The fix for Task 1 will stabilize the client, allowing `CommandAck` messages to be sent reliably.
+        2. Implement client-side logic in `NetworkService.kt` to handle the `ConnectionRejected` message, forcing a re-discovery when a connection is refused due to a stale name.
+
+- [x] **Task 3: Fix Camera Resource Leaks**
+    - **Symptom:** Logs show `A resource failed to call Surface.release`.
+    - **Analysis:** `ImageReader` surfaces are not being closed when the camera is shut down.
+    - **Action:** Modify `RexrayCameraManager.kt` to explicitly close `rawImageReader` and `analysisImageReader` in the `closeCamera()` method.
+
+- [x] **Task 4: Ensure Consistent FPS Setting Propagation**
+    - **Symptom:** The capture rate (FPS) setting is not consistently updated on client devices.
+    - **Analysis:** The `SetParams` message is only broadcast when a change to `captureRate` also forces a change to `shutterSpeed`.
+    - **Action:** In `CaptureActivity.kt`, modify the `captureRateSeekBar` listener to unconditionally broadcast a `SetParams` message whenever the user changes the value.
+
+- [x] **Task 1: Resolve Lifecycle and Threading Issues**
+    - [x] **Symptom:** Logs show `IllegalStateException: ... message to a Handler on a dead thread` and `Skipped 52 frames! ... too much work on its main thread`.
+    - [x] **Analysis:** Critical errors in background thread management and UI updates are causing instability and performance degradation, leading to UI freezes and missed state updates.
+    - [x] **Action:** Refactor thread and lifecycle management in `CaptureActivity.kt`. Ensure all camera and network operations are off the main thread, callbacks are handled safely, and all executors and threads are properly shut down.
+
+- [x] **Task 2: Fix Camera Resource Leaks**
+    - [x] **Symptom:** Logs show `A resource failed to call Surface.release`.
+    - [x] **Analysis:** `Surface` objects from the camera's `ImageReader` are not being released correctly, leading to memory leaks and camera hardware failures.
+    - [x] **Action:** Modify `RexrayCameraManager.kt` to ensure `rawImageReader` and `analysisImageReader` are explicitly closed when the camera is shut down.
+
+- [x] **Task 3: Fix Stale Discovery and Connection Logic**
+    - [x] **Symptom:** A client with a stale project name connects, but its status updates are not reflected on the server UI.
+    - [x] **Analysis:** The server accepts connections from clients with out-of-date service information, leading to a desynchronized state where the server cannot correctly process the client's messages.
+    - [x] **Action:** In `NetworkService.kt`, add a check within the `JoinGroup` message handler. The server will compare the `projectName` from the client's service info with its own. If they do not match, the connection will be rejected, forcing the client to re-discover.
+
+- [x] **Task 4: Ensure Consistent FPS Setting Propagation**
+    - [x] **Symptom:** The capture rate (FPS) setting is not consistently updated on client devices.
+    - [x] **Analysis:** The `SetParams` message is only broadcast when a change to `captureRate` also forces a change to `shutterSpeed`.
+    - [x] **Action:** In `CaptureActivity.kt`, modify the `captureRateSeekBar` listener to unconditionally broadcast a `SetParams` message with the updated settings whenever the user changes the value.
+
+- [x] **Task 1: Implement Auto-Discovery on Mode Switch**
+    - [x] **Goal:** Automatically start network discovery when the user switches from Primary to Client mode.
+    - [x] **Action 1:** In `CaptureActivity.kt`, add an `autoDiscover` boolean extra to the `Intent` that launches `SetupActivity`.
+    - [x] **Action 2:** In `SetupActivity.kt`, check for the `autoDiscover` extra in `onCreate()` and trigger discovery if it's `true`.
+
+- [x] **Task 1: Fix Client-to-Primary Command Injection Vulnerability**
+    - [x] **Analyze Vulnerability:** A client can send commands (e.g., `ArmCapture`) that are incorrectly processed by the primary, leading to unintended behavior.
+    - [x] **Whitelist Messages:** In `NetworkService.kt`, modify the `handleClient` function to only process expected client-side messages (`JoinGroup`, `LeaveGroup`, `StatusUpdate`, `CommandAck`, `UpdateCameraName`).
+    - [x] **Discard Others:** All other unexpected message types will be logged as errors and discarded.
+
+- [x] **Task 2: Resolve State Variable Race Condition**
+    - [x] **Identify Race Condition:** In `CaptureActivity.kt`, state variables like `isArmed` are accessed from both the UI and background threads without synchronization.
+    - [x] **Implement Atomic State:** Convert `isArmed`, `isCapturing`, and `isAnalyzing` to `AtomicBoolean` to ensure thread-safe read/write operations.
+
+- [x] **Task 1: Fix Crash on Command Acknowledgement**
+    - [x] **Identify Cause:** Analyzed logcat and identified `IllegalArgumentException` in `MessageTypeAdapterFactory.kt`.
+    - [x] **Update Adapter:** Added `CommandAck` to the `when` statement in the `read` function of the `MessageTypeAdapterFactory`.
+    - [x] **Verify Fix:** Built the project successfully.
+
+- [x] **Task 1: Optimize Server Thread Handling**
+    - [x] **Replace Executor:** In `NetworkService.kt`, replace the `Executors.newCachedThreadPool()` with a more efficient `Executors.newFixedThreadPool(numCores * 2)` to prevent resource exhaustion and improve scalability.
+
+- [x] **Task 2: Implement Periodic Client Status Updates**
+    - [x] **Create Status Job:** In `NetworkService.kt`, create a repeating background job to run every 2 seconds on the client.
+    - [x] **Gather Status:** In `CaptureActivity.kt`, provide the `imageCount` and `isArmed` status to the `NetworkService`.
+    - [x] **Send Status:** The background job will collect the status and send it to the server in a `StatusUpdate` message.
+    - [x] **Process Status:** On the server, handle the incoming `StatusUpdate` message and update the `_connectedClients` state flow.
+
+- [x] **Task 3: Implement Command Acknowledgement (ACK) System**
+    - [x] **Update Protocol:** Add a unique `commandId: String` to all server-to-client commands and create a new `CommandAck(commandId: String)` message.
+    - [x] **Client-Side ACK:** When a client receives and processes a command, it will send a `CommandAck` message back to the server.
+    - [x] **Server-Side Tracking:** Add a `lastCommandAck: Boolean` property to the `ClientStatus` data class. When a command is sent, set this to `false` for all clients. When an ACK is received, set it to `true`.
+    - [x] **Update UI:** Modify the `ClientStatusAdapter` to visually indicate the acknowledgement status of each client.
+
 - [x] **Task 1: Ensure Consistent Settings Synchronization**
     - [x] **Unconditional Server Broadcasts:**
         - [x] In `CaptureActivity.kt`, modify the `captureRateSeekBar` listener to broadcast settings changes unconditionally.
@@ -92,3 +168,27 @@ This document archives all completed tasks for the project.
 - [x] **Task 2: Resolve UI Layout and Visibility Issues**
     - [x] **Adjust `activity_capture.xml`:** Modify the `activity_capture.xml` layout file to ensure the "Disconnect" button (`switchModeButton`) is always visible and not overlapped by other views. Ensure the client list and its header are hidden when in client mode.
     - [x] **Refine `setupUIForRole`:** In `CaptureActivity.kt`, refine the `setupUIForRole` method to ensure the correct UI elements are hidden or shown based on the device's role.
+- [x] **Task 1: Implement `StopCapture` Command**
+    - **Goal:** Ensure all clients stop capturing the instant the primary device does.
+    - **Action:**
+        1. In `NetworkService.kt`, add a `StopCapture(commandId: String)` message to the `Message` protocol.
+        2. In `CaptureActivity.kt`, modify `stopBurstCapture()` on the primary device to broadcast this new `StopCapture` message.
+        3. In `CaptureActivity.kt`, update the client-side `incomingMessages` collector to handle the `StopCapture` message, call the local `stopBurstCapture()` function, and send a `CommandAck` message back.
+- [x] **Task 2: Centralize Settings Synchronization**
+    - **Goal:** Make settings synchronization robust and eliminate inconsistent behavior.
+    - **Action:**
+        1. In `CaptureActivity.kt`, create a new private `broadcastSettings()` function that constructs and broadcasts the `SetParams` message with all four current settings (ISO, shutter speed, capture rate, and capture limit).
+        2. Modify the `onProgressChanged` listeners for all four settings `SeekBar` controls. Each listener will now call the new `broadcastSettings()` function whenever its value changes, ensuring any adjustment is propagated immediately and consistently.
+- [x] **Task 3: Implement Dynamic, Event-Driven Status Updates**
+    - **Goal:** Provide immediate UI feedback for critical actions and maintain an efficient, dynamic polling rate for background status.
+    - **Action:**
+        1. **Event-Driven Updates:** In `CaptureActivity.kt`, add logic to the client-side handlers for `ArmCapture`, `DisarmCapture`, and `StartCapture` (and the new `StopCapture`) to immediately send a one-off `StatusUpdate` message back to the primary the moment a command is executed.
+        2. **Dynamic Polling Rate:** In `NetworkService.kt`, the status update scheduler will be modified. It will use a 250ms interval when the client is armed and a 2000ms interval when it is disarmed. This will be achieved by canceling and rescheduling the repeating task whenever the client's armed state changes. This provides frequent updates on image counts during a capture while reducing network traffic during idle periods.
+- [x] **Task 4: Fix Client-Side Deserialization Crash**
+    - **Goal:** Prevent the client from crashing when it receives a `StopCapture` message.
+    - **Action:** In `MessageTypeAdapterFactory.kt`, add the `StopCapture` message type to the `when` statement in the `read` function.
+- [x] **Task 5: Refactor Client Management to Support Multiple Connections from a Single IP**
+    - **Goal:** Correct the flawed client management logic that uses the IP address as a unique key, preventing multiple clients on the same IP from being managed correctly.
+    - **Action:**
+        1. In `NetworkService.kt`, change the key of the `_connectedClients` map from `String` to `java.net.Socket`.
+        2. Update all functions that interact with this map to use the `Socket` object for all lookups, insertions, and deletions.

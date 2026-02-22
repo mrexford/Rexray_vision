@@ -39,14 +39,18 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.log10
@@ -88,12 +92,13 @@ class CaptureActivity : AppCompatActivity() {
 
     private lateinit var backgroundThread: HandlerThread
     private lateinit var backgroundHandler: Handler
+    private lateinit var cameraExecutor: ExecutorService
     private lateinit var rexrayCameraManager: RexrayCameraManager
 
     private val imageQueue = LinkedBlockingQueue<Image>()
     private lateinit var imageSaverExecutor: ThreadPoolExecutor
 
-    private var isCapturing = false
+    private val isCapturing = AtomicBoolean(false)
     private lateinit var currentProjectName: String
     private lateinit var cameraName: String
 
@@ -101,8 +106,8 @@ class CaptureActivity : AppCompatActivity() {
     private var shutterSpeed = 3333333L // 1/300s
     private var captureRate = 10
     private var captureLimit = 20
-    private var isArmed = false
-    private var isAnalyzing = false
+    private val isArmed = AtomicBoolean(false)
+    private val isAnalyzing = AtomicBoolean(false)
     private val capturedImageCount = AtomicInteger(0)
     private var analysisPasses = 0
     private var exposureAnalysisStrategy: ExposureAnalysisStrategy = HistogramEttrAnalysisStrategy()
@@ -121,6 +126,7 @@ class CaptureActivity : AppCompatActivity() {
     private var isBound = false
     private lateinit var clientStatusAdapter: ClientStatusAdapter
     private lateinit var sharedPreferences: SharedPreferences
+    private var networkStateJob: Job? = null
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -145,13 +151,15 @@ class CaptureActivity : AppCompatActivity() {
         while (!Thread.currentThread().isInterrupted) {
             try {
                 val image = imageQueue.take()
-                if (rexrayCameraManager.cameraDevice == null) {
+                val activeCameraDevice = rexrayCameraManager.cameraDevice
+                if (activeCameraDevice == null) {
                     image.close()
                     continue
                 }
-                val characteristics = cameraManager.getCameraCharacteristics(rexrayCameraManager.cameraDevice!!.id)
-                captureResult?.let { result ->
-                    val dngCreator = DngCreator(characteristics, result)
+                val characteristics = cameraManager.getCameraCharacteristics(activeCameraDevice.id)
+                val currentCaptureResult = captureResult
+                if (currentCaptureResult != null) {
+                    val dngCreator = DngCreator(characteristics, currentCaptureResult)
                     val rotation = display?.rotation ?: Surface.ROTATION_0
                     val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION)!!
                     dngCreator.setOrientation(getExifOrientation(rotation, sensorOrientation))
@@ -180,12 +188,12 @@ class CaptureActivity : AppCompatActivity() {
     private val cameraStateCallback = object : CameraDevice.StateCallback() {
         override fun onOpened(camera: CameraDevice) {
             rexrayCameraManager.cameraDevice = camera
-            runOnUiThread {
+            createCameraPreviewSession()
+            safeRunOnUiThread { 
                 permissionsTextView.visibility = View.GONE
                 setupSettingsControls()
                 observeNetworkState()
             }
-            createCameraPreviewSession()
         }
         override fun onDisconnected(camera: CameraDevice) {
             camera.close()
@@ -194,6 +202,11 @@ class CaptureActivity : AppCompatActivity() {
         override fun onError(camera: CameraDevice, error: Int) {
             camera.close()
             rexrayCameraManager.cameraDevice = null
+            Log.e(tag, "Camera Error: $error")
+            safeRunOnUiThread {
+                permissionsTextView.text = "Camera Error: $error. Please restart the app."
+                permissionsTextView.visibility = View.VISIBLE
+            }
         }
     }
 
@@ -268,22 +281,25 @@ class CaptureActivity : AppCompatActivity() {
             switchModeButton.text = "Switch to Client"
             switchModeButton.setOnClickListener { showSwitchModeDialog() }
             regenerateCameraNameButton.setOnClickListener { generateCameraName(true) }
-            newProjectButton.setOnClickListener { if (!isCapturing) setupNewProject(true) }
+            newProjectButton.setOnClickListener { if (!isCapturing.get()) setupNewProject(true) }
             captureButton.setOnClickListener {
-                if (isCapturing) {
+                if (isCapturing.get()) {
                     stopBurstCapture()
                 } else {
+                    val commandId = UUID.randomUUID().toString()
                     startBurstCapture()
-                    networkService?.broadcastMessage(NetworkService.Message.StartCapture)
+                    networkService?.broadcastMessage(NetworkService.Message.StartCapture(commandId))
                 }
             }
             analyzeSceneButton.setOnClickListener { if (rexrayCameraManager.cameraDevice != null) analyzeScene(false) }
             armButton.setOnClickListener {
-                isArmed = !isArmed
-                if (isArmed) {
-                    networkService?.broadcastMessage(NetworkService.Message.ArmCapture)
+                val newArmedState = !isArmed.get()
+                isArmed.set(newArmedState)
+                val commandId = UUID.randomUUID().toString()
+                if (newArmedState) {
+                    networkService?.broadcastMessage(NetworkService.Message.ArmCapture(commandId))
                 } else {
-                    networkService?.broadcastMessage(NetworkService.Message.DisarmCapture)
+                    networkService?.broadcastMessage(NetworkService.Message.DisarmCapture(commandId))
                 }
                 updateArmingState()
             }
@@ -304,13 +320,23 @@ class CaptureActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         saveSettings()
+        networkStateJob?.cancel()
+        try {
+            cameraCaptureSession?.stopRepeating()
+            cameraCaptureSession?.abortCaptures()
+        } catch (e: Exception) {
+            Log.e(tag, "Error stopping camera session", e)
+        }
+        cameraCaptureSession?.close()
+        
         rexrayCameraManager.closeCamera()
-        stopImageSaver()
-        stopBackgroundThread()
+
         if (isBound) {
             unbindService(connection)
             isBound = false
         }
+        stopImageSaver()
+        stopBackgroundThread()
     }
 
     override fun onResume() {
@@ -320,44 +346,65 @@ class CaptureActivity : AppCompatActivity() {
     }
 
     private fun observeNetworkState() {
-        if (isClient) {
-            lifecycleScope.launch {
-                networkService?.isConnectedToPrimary?.drop(1)?.collect { isConnected ->
-                    if (!isConnected) {
-                        val intent = Intent(this@CaptureActivity, SetupActivity::class.java)
-                        intent.flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
-                        startActivity(intent)
-                        finish()
+        networkStateJob = lifecycleScope.launch {
+            launch {
+                if (isClient) {
+                    networkService?.isConnectedToPrimary?.drop(1)?.collect { isConnected ->
+                        if (!isConnected) {
+                            val intent = Intent(this@CaptureActivity, SetupActivity::class.java)
+                            intent.flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
+                            startActivity(intent)
+                            finish()
+                        }
                     }
                 }
             }
-        }
-        lifecycleScope.launch {
-            networkService?.connectedClients?.collect { clients ->
-                clientStatusAdapter.clear()
-                clientStatusAdapter.addAll(clients.values)
-                clientStatusAdapter.notifyDataSetChanged()
-                updateArmingState()
+            launch {
+                networkService?.connectedClients?.collect { clients ->
+                    clientStatusAdapter.clear()
+                    clientStatusAdapter.addAll(clients.values)
+                    clientStatusAdapter.notifyDataSetChanged()
+                    updateArmingState()
+                }
             }
-        }
-        lifecycleScope.launch {
-            networkService?.incomingMessages?.collect { messagePair ->
-                messagePair?.let { (socket, message) ->
-                    when (message) {
-                        is NetworkService.Message.ArmCapture -> armCapture()
-                        is NetworkService.Message.DisarmCapture -> disarmCapture()
-                        is NetworkService.Message.StartCapture -> startBurstCapture()
-                        is NetworkService.Message.SetParams -> {
-                            shutterSpeed = message.shutterSpeed
-                            iso = message.iso
-                            captureLimit = message.captureCount
-                            currentProjectName = message.projectName
-                            updateUIFromNetwork()
+            launch {
+                networkService?.incomingMessages?.collect { messagePair ->
+                    messagePair?.let { (socket, message) ->
+                        when (message) {
+                            is NetworkService.Message.ArmCapture -> {
+                                armCapture()
+                                networkService?.sendMessageToPrimary(NetworkService.Message.CommandAck(message.commandId))
+                                sendStatusUpdate()
+                            }
+                            is NetworkService.Message.DisarmCapture -> {
+                                disarmCapture()
+                                networkService?.sendMessageToPrimary(NetworkService.Message.CommandAck(message.commandId))
+                                sendStatusUpdate()
+                            }
+                            is NetworkService.Message.StartCapture -> {
+                                startBurstCapture()
+                                networkService?.sendMessageToPrimary(NetworkService.Message.CommandAck(message.commandId))
+                                sendStatusUpdate()
+                            }
+                            is NetworkService.Message.StopCapture -> {
+                                stopBurstCapture()
+                                networkService?.sendMessageToPrimary(NetworkService.Message.CommandAck(message.commandId))
+                                sendStatusUpdate()
+                            }
+                            is NetworkService.Message.SetParams -> {
+                                shutterSpeed = message.shutterSpeed
+                                iso = message.iso
+                                captureRate = message.captureRate
+                                captureLimit = message.captureCount
+                                currentProjectName = message.projectName
+                                updateUIFromNetwork()
+                                networkService?.sendMessageToPrimary(NetworkService.Message.CommandAck(message.commandId))
+                            }
+                            is NetworkService.Message.UpdateCameraName -> {
+                                networkService?.updateClientCameraName(socket, message.name)
+                            }
+                            else -> {}
                         }
-                        is NetworkService.Message.UpdateCameraName -> {
-                            networkService?.updateClientCameraName(socket, message.name)
-                        }
-                        else -> {}
                     }
                 }
             }
@@ -365,22 +412,25 @@ class CaptureActivity : AppCompatActivity() {
     }
 
     private fun armCapture() {
-        isArmed = true
+        isArmed.set(true)
+        networkService?.isClientArmed = true
         updateArmingState()
     }
 
     private fun disarmCapture() {
-        isArmed = false
+        isArmed.set(false)
+        networkService?.isClientArmed = false
         updateArmingState()
     }
 
     private fun updateArmingState() {
-        runOnUiThread {
+        safeRunOnUiThread {
             if(!isClient) {
-                armButton.text = if (isArmed) "Disarm" else "Arm"
+                val currentArmedState = isArmed.get()
+                armButton.text = if (currentArmedState) "Disarm" else "Arm"
                 armButton.isEnabled = true
-                captureButton.isEnabled = isArmed
-                captureButton.alpha = if(isArmed) 1.0f else 0.5f
+                captureButton.isEnabled = currentArmedState
+                captureButton.alpha = if(currentArmedState) 1.0f else 0.5f
             }
         }
     }
@@ -404,12 +454,12 @@ class CaptureActivity : AppCompatActivity() {
             rexrayCameraManager.rawImageReader.setOnImageAvailableListener({ reader ->
                 val image: Image? = try { reader.acquireNextImage() } catch (_: IllegalStateException) { null }
                 image?.let { img ->
-                    if (capturedImageCount.get() < captureLimit && isCapturing) {
+                    if (capturedImageCount.get() < captureLimit && isCapturing.get()) {
                         if (!imageQueue.offer(img)) {
                             img.close()
                         }
                     } else {
-                        if (isCapturing) runOnUiThread { stopBurstCapture() }
+                        if (isCapturing.get()) safeRunOnUiThread { stopBurstCapture() }
                         img.close()
                     }
                 }
@@ -419,12 +469,12 @@ class CaptureActivity : AppCompatActivity() {
                 val image: Image? = try { reader.acquireNextImage() } catch (_: IllegalStateException) { null }
                 image?.let {
                     val histogram = exposureAnalysisStrategy.getHistogram(it)
-                    runOnUiThread { histogramView.updateHistogram(histogram) }
+                    safeRunOnUiThread { histogramView.updateHistogram(histogram) }
 
-                    if(isAnalyzing) {
+                    if(isAnalyzing.get()) {
                         if (analysisPasses >= maxAnalysisPasses) {
-                            isAnalyzing = false
-                            runOnUiThread { Toast.makeText(this@CaptureActivity, "Auto ISO: Settled at $iso", Toast.LENGTH_SHORT).show() }
+                            isAnalyzing.set(false)
+                            safeRunOnUiThread { Toast.makeText(this@CaptureActivity, "Auto ISO: Settled at $iso", Toast.LENGTH_SHORT).show() }
                         } else {
                             val percentileValue = exposureAnalysisStrategy.analyze(it)
                             Log.d(tag, "Analysis Pass: $analysisPasses, 95th Percentile: $percentileValue, Current ISO: $iso")
@@ -436,25 +486,21 @@ class CaptureActivity : AppCompatActivity() {
                                 if (abs(newIso - iso) > 5) {
                                     iso = newIso
                                     Log.d(tag, "Adjusting ISO to: $iso")
-                                    runOnUiThread {
+                                    safeRunOnUiThread {
                                         isoSeekBar.progress = iso
                                         isoValueTextView.text = iso.toString()
                                         updatePreview()
                                     }
-                                    if (!isClient) {
-                                        networkService?.broadcastMessage(NetworkService.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
-                                    }
+                                    broadcastSettings()
                                     backgroundHandler.postDelayed({ analyzeScene(true) }, 300)
                                 } else {
-                                    isAnalyzing = false // Coalesced
-                                    runOnUiThread { Toast.makeText(this@CaptureActivity, "Auto ISO: Coalesced at $iso", Toast.LENGTH_SHORT).show() }
-                                    if (!isClient) {
-                                        networkService?.broadcastMessage(NetworkService.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
-                                    }
+                                    isAnalyzing.set(false) // Coalesced
+                                    safeRunOnUiThread { Toast.makeText(this@CaptureActivity, "Auto ISO: Coalesced at $iso", Toast.LENGTH_SHORT).show() }
+                                    broadcastSettings()
                                 }
                             } else {
-                                isAnalyzing = false
-                                runOnUiThread { Toast.makeText(this@CaptureActivity, "Auto ISO: Failed", Toast.LENGTH_SHORT).show() }
+                                isAnalyzing.set(false)
+                                safeRunOnUiThread { Toast.makeText(this@CaptureActivity, "Auto ISO: Failed", Toast.LENGTH_SHORT).show() }
                             }
                         }
                         analysisPasses++
@@ -474,14 +520,16 @@ class CaptureActivity : AppCompatActivity() {
                     android.hardware.camera2.params.OutputConfiguration(rexrayCameraManager.rawImageReader.surface),
                     android.hardware.camera2.params.OutputConfiguration(rexrayCameraManager.analysisImageReader.surface)
                 ),
-                Executors.newSingleThreadExecutor(),
+                cameraExecutor,
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         if (rexrayCameraManager.cameraDevice == null) return
                         cameraCaptureSession = session
                         updatePreview()
                     }
-                    override fun onConfigureFailed(session: CameraCaptureSession) { }
+                    override fun onConfigureFailed(session: CameraCaptureSession) { 
+                        Log.e(tag, "Camera session configuration failed.")
+                    }
                 }
             )
             rexrayCameraManager.cameraDevice?.createCaptureSession(sessionConfig)
@@ -501,7 +549,7 @@ class CaptureActivity : AppCompatActivity() {
     private fun startBurstCapture() {
         capturedImageCount.set(0)
         updateCaptureCount(0)
-        runOnUiThread { captureBorder.visibility = View.VISIBLE }
+        safeRunOnUiThread { captureBorder.visibility = View.VISIBLE }
 
         try {
             val texture = textureView.surfaceTexture!!
@@ -520,31 +568,42 @@ class CaptureActivity : AppCompatActivity() {
             val captureCallback = object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                     captureResult = result
-                    updateCaptureCount(capturedImageCount.incrementAndGet())
+                    val count = capturedImageCount.incrementAndGet()
+                    updateCaptureCount(count)
+                    networkService?.currentImageCount = count
                 }
             }
             cameraCaptureSession?.setRepeatingRequest(captureBuilder.build(), captureCallback, backgroundHandler)
-            isCapturing = true
+            isCapturing.set(true)
             if(!isClient) {
-                runOnUiThread { captureButton.text = getString(R.string.stop) }
+                safeRunOnUiThread { captureButton.text = getString(R.string.stop) }
             }
         } catch(_: CameraAccessException) { }
     }
 
     private fun stopBurstCapture() {
-        isCapturing = false
-        isArmed = false
-        runOnUiThread {
-            captureBorder.visibility = View.GONE
-            updateArmingState()
-        }
-        try {
-            cameraCaptureSession?.abortCaptures()
-            cameraCaptureSession?.stopRepeating()
-            updatePreview()
-        } catch (_: CameraAccessException) { }
-        if(!isClient) {
-            runOnUiThread { captureButton.text = getString(R.string.capture) }
+        if (isCapturing.get()) {
+            isCapturing.set(false)
+            isArmed.set(false)
+
+            if (!isClient) {
+                val commandId = UUID.randomUUID().toString()
+                networkService?.broadcastMessage(NetworkService.Message.StopCapture(commandId))
+                safeRunOnUiThread { captureButton.text = getString(R.string.capture) }
+            }
+
+            safeRunOnUiThread {
+                captureBorder.visibility = View.GONE
+                updateArmingState()
+            }
+
+            try {
+                cameraCaptureSession?.abortCaptures()
+                cameraCaptureSession?.stopRepeating()
+                updatePreview()
+            } catch (e: CameraAccessException) {
+                Log.e(tag, "Error stopping burst capture", e)
+            }
         }
     }
 
@@ -567,6 +626,7 @@ class CaptureActivity : AppCompatActivity() {
                 contentValues.clear()
                 contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
                 resolver.update(it, contentValues, null, null)
+                Log.i(tag, "DNG_SAVE_SUCCESS: $fileName")
             } catch (_: Exception) { resolver.delete(it, null, null) }
         }
     }
@@ -579,12 +639,10 @@ class CaptureActivity : AppCompatActivity() {
         }
         currentProjectName = pName
 
-        runOnUiThread {
+        safeRunOnUiThread {
             projectNameTextView.text = currentProjectName
             updateArmingState()
-            if (!isClient) {
-                networkService?.broadcastMessage(NetworkService.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
-            }
+            broadcastSettings()
         }
     }
 
@@ -595,7 +653,7 @@ class CaptureActivity : AppCompatActivity() {
             sharedPreferences.edit { putString("cameraName", aName) }
         }
         cameraName = aName
-        runOnUiThread {
+        safeRunOnUiThread {
             cameraNameTextView.text = cameraName
         }
         if (!isClient) {
@@ -618,9 +676,7 @@ class CaptureActivity : AppCompatActivity() {
         isoSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, p: Int, fromUser: Boolean) {
                 isoValueTextView.text = p.toString(); iso = p; updatePreview()
-                if (fromUser && !isClient) {
-                    networkService?.broadcastMessage(NetworkService.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
-                }
+                if (fromUser) broadcastSettings()
                 updateSettingsDisplay()
             }
             override fun onStartTrackingTouch(s: SeekBar) {}
@@ -646,9 +702,7 @@ class CaptureActivity : AppCompatActivity() {
                 shutterSpeedValueTextView.text = getString(R.string.shutter_speed_value_format, shutterInv)
                 shutterSpeed = 1_000_000_000L / shutterInv
                 updatePreview()
-                if (fromUser && !isClient) {
-                    networkService?.broadcastMessage(NetworkService.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
-                }
+                if (fromUser) broadcastSettings()
                 updateSettingsDisplay()
             }
             override fun onStartTrackingTouch(s: SeekBar) {}
@@ -674,9 +728,7 @@ class CaptureActivity : AppCompatActivity() {
                         shutterSpeedSeekBar.progress = (100 * (log10(shutterAsSpeed.toDouble()) - logMin) / (logMax - logMin)).toInt()
                         updatePreview()
                     }
-                    if(fromUser && !isClient) {
-                        networkService?.broadcastMessage(NetworkService.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
-                    }
+                    if(fromUser) broadcastSettings()
                 }
                 updateSettingsDisplay()
             }
@@ -694,9 +746,7 @@ class CaptureActivity : AppCompatActivity() {
             override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
                 if (p>0) {
                     captureLimitValueTextView.text = p.toString(); captureLimit = p
-                    if (fromUser && !isClient) {
-                        networkService?.broadcastMessage(NetworkService.Message.SetParams(shutterSpeed, iso, captureLimit, currentProjectName))
-                    }
+                    if (fromUser) broadcastSettings()
                 }
                 updateSettingsDisplay()
             }
@@ -706,6 +756,19 @@ class CaptureActivity : AppCompatActivity() {
 
         analyzeSceneButton.setOnClickListener { analyzeScene(false) }
         updateSettingsDisplay()
+    }
+
+    private fun broadcastSettings() {
+        if (!isClient) {
+            val commandId = UUID.randomUUID().toString()
+            networkService?.broadcastMessage(NetworkService.Message.SetParams(shutterSpeed, iso, captureRate, captureLimit, currentProjectName, commandId))
+        }
+    }
+
+    private fun sendStatusUpdate() {
+        if (isClient) {
+            networkService?.sendStatusUpdate()
+        }
     }
 
     private fun saveSettings() {
@@ -730,7 +793,10 @@ class CaptureActivity : AppCompatActivity() {
             .setMessage("Are you sure you want to switch to client mode? Settings will be saved.")
             .setPositiveButton("Switch") { _, _ ->
                 networkService?.unregisterService()
-                startActivity(Intent(this, SetupActivity::class.java))
+                val intent = Intent(this, SetupActivity::class.java).apply {
+                    putExtra("autoDiscover", true)
+                }
+                startActivity(intent)
                 finish()
             }
             .setNegativeButton("Cancel", null)
@@ -738,7 +804,7 @@ class CaptureActivity : AppCompatActivity() {
     }
 
     private fun updateUIFromNetwork() {
-        runOnUiThread {
+        safeRunOnUiThread {
             val shutterMinInv = 60.0 // 1/60s
             val shutterMaxInv = 2000.0 // 1/2000s
             val logMin = log10(shutterMinInv)
@@ -765,7 +831,7 @@ class CaptureActivity : AppCompatActivity() {
     private fun analyzeScene(isContinuing: Boolean) {
         if (!isContinuing) {
             analysisPasses = 0
-            isAnalyzing = true
+            isAnalyzing.set(true)
         }
         try {
             val captureBuilder = rexrayCameraManager.cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
@@ -822,9 +888,41 @@ class CaptureActivity : AppCompatActivity() {
         imageSaverExecutor = ThreadPoolExecutor(numCores * 2, numCores * 2, 60L, TimeUnit.SECONDS, LinkedBlockingQueue())
         imageSaverExecutor.execute(imageSaverRunnable)
     }
-    private fun stopImageSaver() { imageSaverExecutor.shutdownNow(); try { imageSaverExecutor.awaitTermination(500, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { }; imageQueue.clear() }
-    private fun startBackgroundThread() { backgroundThread = HandlerThread("CameraBackground").also { it.start() }; backgroundHandler = Handler(backgroundThread.looper) }
-    private fun stopBackgroundThread() { backgroundThread.quitSafely(); try { backgroundThread.join() } catch (_: InterruptedException) { } }
+
+    private fun stopImageSaver() {
+        imageSaverExecutor.shutdown()
+        try {
+            if (!imageSaverExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
+                imageSaverExecutor.shutdownNow()
+            }
+        } catch (e: InterruptedException) {
+            imageSaverExecutor.shutdownNow()
+        }
+        imageQueue.clear()
+    }
+    
+    private fun startBackgroundThread() { 
+        backgroundThread = HandlerThread("CameraBackground").also { it.start() }
+        backgroundHandler = Handler(backgroundThread.looper)
+        cameraExecutor = Executors.newSingleThreadExecutor()
+     }
+
+    private fun stopBackgroundThread() {
+        backgroundThread.quitSafely()
+        try {
+            backgroundThread.join(500)
+        } catch (e: InterruptedException) {
+            Log.e(tag, "Background thread join interrupted", e)
+        }
+        cameraExecutor.shutdown()
+        try {
+            if (!cameraExecutor.awaitTermination(500, TimeUnit.MILLISECONDS)) {
+                cameraExecutor.shutdownNow()
+            }
+        } catch (e: InterruptedException) {
+            cameraExecutor.shutdownNow()
+        }
+    }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
@@ -836,12 +934,18 @@ class CaptureActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateCaptureCount(count: Int) { runOnUiThread { captureCountTextView.text = getString(R.string.capture_count_format, count) } }
+    private fun updateCaptureCount(count: Int) { safeRunOnUiThread { captureCountTextView.text = getString(R.string.capture_count_format, count) } }
 
     private fun updateSettingsDisplay() {
         val shutterSpeedString = "1/${1_000_000_000L / shutterSpeed}"
         val settingsText = "ISO: $iso, S: $shutterSpeedString, FPS: $captureRate, Limit: $captureLimit"
         settingsDisplayTextView.text = settingsText
+    }
+
+    private fun safeRunOnUiThread(action: () -> Unit) {
+        if (!isFinishing && !isDestroyed) {
+            runOnUiThread(action)
+        }
     }
 
     class ClientStatusAdapter(context: Context, dataSource: MutableList<NetworkService.ClientStatus>) : ArrayAdapter<NetworkService.ClientStatus>(context, R.layout.client_status_item, dataSource) {
@@ -852,8 +956,9 @@ class CaptureActivity : AppCompatActivity() {
             val statusTextView = view.findViewById<TextView>(R.id.clientStatusTextView)
             val status = getItem(position)
             addressTextView.text = "${status?.cameraName} (${status?.socket?.inetAddress?.hostAddress})"
+            val ackStatus = if(status?.lastCommandAck == true) "✓" else "…"
             val armedStatus = if(status?.isArmed == true) "Armed" else "Disarmed"
-            statusTextView.text = "Images: ${status?.imageCount}, Bat: ${status?.batteryLevel}%, Space: ${status?.storageSpace}MB, $armedStatus"
+            statusTextView.text = "ACK: $ackStatus, Images: ${status?.imageCount}, $armedStatus"
             return view
         }
     }

@@ -37,6 +37,8 @@ class RexrayCameraManager(private val context: Context, private val backgroundHa
     fun closeCamera() {
         cameraDevice?.close()
         cameraDevice = null
+        if (this::rawImageReader.isInitialized) rawImageReader.close()
+        if (this::analysisImageReader.isInitialized) analysisImageReader.close()
     }
 
     private fun chooseOptimalPreviewSize(choices: Array<Size>, textureViewWidth: Int, textureViewHeight: Int, aspectRatio: Size): Size {
