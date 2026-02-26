@@ -5,9 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.util.Log
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -24,14 +22,14 @@ import kotlinx.coroutines.launch
 class SetupActivity : AppCompatActivity() {
 
     private val TAG = "SetupActivity"
-    private lateinit var discoverButton: Button
+    private lateinit var refreshButton: Button
+    private lateinit var becomeServerButton: Button
+    private lateinit var closeAppButton: Button
     private lateinit var serviceListView: ListView
     private lateinit var serviceListAdapter: ArrayAdapter<String>
-    private lateinit var switchModeButton: Button
 
     private var networkService: NetworkService? = null
     private var isBound = false
-    private var isDiscovering = false
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -40,13 +38,6 @@ class SetupActivity : AppCompatActivity() {
             isBound = true
             observeDiscoveredServices()
             observeConnectionState()
-
-            if (intent.getBooleanExtra("autoDiscover", false)) {
-                Handler(Looper.getMainLooper()).postDelayed({
-                    networkService?.discoverServices()
-                    isDiscovering = true
-                }, 1000)
-            }
         }
 
         override fun onServiceDisconnected(arg0: ComponentName) {
@@ -67,32 +58,38 @@ class SetupActivity : AppCompatActivity() {
             insets
         }
 
-        discoverButton = findViewById(R.id.discoverButton)
+        refreshButton = findViewById(R.id.refreshButton)
+        becomeServerButton = findViewById(R.id.becomeServerButton)
+        closeAppButton = findViewById(R.id.closeAppButton)
         serviceListView = findViewById(R.id.serviceListView)
-        switchModeButton = findViewById(R.id.switchModeButton)
 
         serviceListAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf<String>())
         serviceListView.adapter = serviceListAdapter
 
-        switchModeButton.setOnClickListener { 
-            networkService?.stopSelf()
-            startActivity(Intent(this, CaptureActivity::class.java))
-            finish()
+        refreshButton.setOnClickListener {
+            serviceListAdapter.clear()
+            serviceListAdapter.notifyDataSetChanged()
+            networkService?.discoverServices()
+            Toast.makeText(this, "Searching for servers...", Toast.LENGTH_SHORT).show()
         }
 
-        discoverButton.setOnClickListener {
-            if (!isDiscovering) {
-                networkService?.discoverServices()
-                isDiscovering = true
-            }
+        becomeServerButton.setOnClickListener {
+            val intent = Intent(this, CaptureActivity::class.java)
+            intent.putExtra("ROLE", "PRIMARY")
+            intent.putExtra("NEW_PROJECT", true)
+            startActivity(intent)
+        }
+
+        closeAppButton.setOnClickListener {
+            finishAffinity()
         }
 
         serviceListView.onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->
             val serviceName = serviceListAdapter.getItem(position)
             val serviceInfo = networkService?.discoveredServices?.value?.find { it.serviceName == serviceName }
             serviceInfo?.let { 
+                Toast.makeText(this, "Connecting to $serviceName...", Toast.LENGTH_SHORT).show()
                 networkService?.resolveService(it) 
-                Toast.makeText(this, "Connecting to $serviceName", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -102,15 +99,6 @@ class SetupActivity : AppCompatActivity() {
         Intent(this, NetworkService::class.java).also { intent ->
             startService(intent)
             bindService(intent, connection, Context.BIND_AUTO_CREATE)
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        if (isBound) {
-            networkService?.stopDiscovery()
-            unbindService(connection)
-            isBound = false
         }
     }
 
@@ -129,7 +117,7 @@ class SetupActivity : AppCompatActivity() {
             networkService?.isConnectedToPrimary?.collect { isConnected ->
                 if (isConnected) {
                     val intent = Intent(this@SetupActivity, CaptureActivity::class.java)
-                    intent.putExtra("isClient", true)
+                    intent.putExtra("ROLE", "CLIENT")
                     startActivity(intent)
                 }
             }

@@ -18,11 +18,22 @@
     <string name="primary">Primary</string>
     <string name="client">Client</string>
     <string name="discover">Discover</string>
-    <string name="connected_clients">Connected Clients</string>
+    <string name="connected_clients">Client List</string>
     <string name="arm">Arm</string>
     <string name="arm_button_description">Prepares the camera for a low-latency synchronized capture.</string>
     <string name="project_name_label">Project:</string>
     <string name="camera_name_label">Camera:</string>
     <string name="regenerate_camera_name_description">Regenerate Camera Name</string>
     <string name="client_mode">Client Mode</string>
+    <string name="create_new_project">Create New Project (Primary)</string>
+    <string name="join_project">Join Project (Client)</string>
+    <string name="refresh">Refresh</string>
+    <string name="become_a_server">Become a Server</string>
+    <string name="leave_server">Leave Server</string>
+    <string name="stop_server">Stop Server</string>
+    <string name="project_name_client_format">Project: %1$s</string>
+    <string name="camera_name_client_format">Camera: %1$s</string>
+    <string name="project_name_prefix">Project: %1$s</string>
+    <string name="camera_name_prefix">Camera: %1$s</string>
+    <string name="capture_limit_format">Limit: %d</string>
 </resources>

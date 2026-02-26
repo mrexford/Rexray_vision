@@ -8,7 +8,10 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.media.ImageReader
 import android.os.Handler
+import android.util.Log
 import android.util.Size
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
 class RexrayCameraManager(private val context: Context, private val backgroundHandler: Handler) {
 
@@ -18,6 +21,7 @@ class RexrayCameraManager(private val context: Context, private val backgroundHa
     lateinit var rawImageReader: ImageReader
     lateinit var analysisImageReader: ImageReader
     var previewSize: Size? = null
+    val cameraClosed = Semaphore(0)
 
     @SuppressLint("MissingPermission")
     fun openCamera(width: Int, height: Int, cameraStateCallback: CameraDevice.StateCallback) {
@@ -35,10 +39,18 @@ class RexrayCameraManager(private val context: Context, private val backgroundHa
     }
 
     fun closeCamera() {
-        cameraDevice?.close()
-        cameraDevice = null
-        if (this::rawImageReader.isInitialized) rawImageReader.close()
-        if (this::analysisImageReader.isInitialized) analysisImageReader.close()
+        try {
+            cameraDevice?.close()
+            cameraDevice = null
+            if (!cameraClosed.tryAcquire(2, TimeUnit.SECONDS)) {
+                Log.e("RexrayCameraManager", "Camera closing timeout")
+            }
+        } catch (e: InterruptedException) {
+            Log.e("RexrayCameraManager", "Interrupted while closing camera", e)
+        } finally {
+            if (this::rawImageReader.isInitialized) rawImageReader.close()
+            if (this::analysisImageReader.isInitialized) analysisImageReader.close()
+        }
     }
 
     private fun chooseOptimalPreviewSize(choices: Array<Size>, textureViewWidth: Int, textureViewHeight: Int, aspectRatio: Size): Size {

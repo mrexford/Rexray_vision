@@ -24,7 +24,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Rexray_vision">
         <activity
-            android:name=".CaptureActivity"
+            android:name=".MainActivity"
+            android:exported="false" />
+        <activity android:name=".CaptureActivity" android:exported="false" />
+        <activity
+            android:name=".SetupActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -32,8 +36,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".MainActivity" android:exported="false" />
-        <activity android:name=".SetupActivity" android:exported="false" />
         <service
             android:name=".NetworkService"
             android:exported="false"
