@@ -1,0 +1,234 @@
+package com.example.rexray_vision
+
+import android.content.Context
+import android.graphics.Color
+import android.os.Bundle
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.*
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.fragment.app.Fragment
+
+class PrimaryControlsFragment : Fragment() {
+
+    interface PrimaryControlsListener {
+        fun onNewProject()
+        fun onArmCapture(broadcast: Boolean)
+        fun onDisarmCapture(broadcast: Boolean)
+        fun onStartCapture()
+        fun onStopCapture()
+        fun onAnalyzeScene()
+        fun onStopServer()
+        fun onRegenerateCameraName()
+        fun setIso(value: Int)
+        fun setShutterSpeed(value: Long)
+        fun setCaptureRate(value: Int)
+        fun setCaptureLimit(value: Int)
+        fun onCloseApp()
+    }
+
+    private var listener: PrimaryControlsListener? = null
+
+    private lateinit var newProjectButton: Button
+    private lateinit var armButton: Button
+    private lateinit var captureButton: Button
+    private lateinit var analyzeSceneButton: Button
+    private lateinit var stopServerButton: Button
+    private lateinit var isoSeekBar: SeekBar
+    private lateinit var shutterSpeedSeekBar: SeekBar
+    private lateinit var captureRateSeekBar: SeekBar
+    private lateinit var captureLimitSeekBar: SeekBar
+    private lateinit var isoValueTextView: TextView
+    private lateinit var shutterSpeedValueTextView: TextView
+    private lateinit var captureRateValueTextView: TextView
+    private lateinit var captureLimitValueTextView: TextView
+    private lateinit var projectNameTextView: TextView
+    private lateinit var cameraNameTextView: TextView
+    private lateinit var settingsDisplayTextView: TextView
+    private lateinit var clientListView: ListView
+    private lateinit var histogramView: HistogramView
+    private lateinit var closeAppButton: Button
+    private lateinit var autoIsoIndicator: TextView
+
+    private val shutterSpeeds = (200..1200 step 50).map { 1_000_000_000L / it }.toTypedArray()
+
+    override fun onAttach(context: Context) {
+        super.onAttach(context)
+        if (context is PrimaryControlsListener) {
+            listener = context
+        } else {
+            throw RuntimeException("$context must implement PrimaryControlsListener")
+        }
+    }
+
+    override fun onCreateView(
+        inflater: LayoutInflater, container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View? {
+        val view = inflater.inflate(R.layout.fragment_primary_controls, container, false)
+
+        newProjectButton = view.findViewById(R.id.newProjectButton)
+        armButton = view.findViewById(R.id.armButton)
+        captureButton = view.findViewById(R.id.captureButton)
+        analyzeSceneButton = view.findViewById(R.id.analyzeSceneButton)
+        stopServerButton = view.findViewById(R.id.stopServerButton)
+        isoSeekBar = view.findViewById(R.id.isoSeekBar)
+        shutterSpeedSeekBar = view.findViewById(R.id.shutterSpeedSeekBar)
+        captureRateSeekBar = view.findViewById(R.id.captureRateSeekBar)
+        captureLimitSeekBar = view.findViewById(R.id.captureLimitSeekBar)
+        isoValueTextView = view.findViewById(R.id.isoValueTextView)
+        shutterSpeedValueTextView = view.findViewById(R.id.shutterSpeedValueTextView)
+        captureRateValueTextView = view.findViewById(R.id.captureRateValueTextView)
+        captureLimitValueTextView = view.findViewById(R.id.captureLimitValueTextView)
+        projectNameTextView = view.findViewById(R.id.projectNameTextView)
+        cameraNameTextView = view.findViewById(R.id.cameraNameTextView)
+        settingsDisplayTextView = view.findViewById(R.id.settingsDisplayTextView)
+        clientListView = view.findViewById(R.id.clientListView)
+        histogramView = view.findViewById(R.id.histogramView)
+        closeAppButton = view.findViewById(R.id.closeAppButton)
+        autoIsoIndicator = view.findViewById(R.id.autoIsoIndicator)
+
+        ViewCompat.setOnApplyWindowInsetsListener(view) { v, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+            insets
+        }
+
+        setupViews()
+        setupListeners()
+
+        return view
+    }
+
+    private fun setupViews() {
+        isoSeekBar.min = 50
+        isoSeekBar.max = 1000
+        shutterSpeedSeekBar.max = shutterSpeeds.size - 1
+        captureRateSeekBar.min = 3
+        captureRateSeekBar.max = 15
+        captureLimitSeekBar.min = 1
+        captureLimitSeekBar.max = 100
+    }
+
+    private fun setupListeners() {
+        newProjectButton.setOnClickListener { listener?.onNewProject() }
+        armButton.setOnClickListener {
+            val isArmed = (activity as? CaptureActivity)?.getIsArmed() ?: false
+            if (isArmed) {
+                listener?.onDisarmCapture(true)
+            } else {
+                listener?.onArmCapture(true)
+            }
+        }
+        captureButton.setOnClickListener { listener?.onStartCapture() }
+        analyzeSceneButton.setOnClickListener { listener?.onAnalyzeScene() }
+        stopServerButton.setOnClickListener { listener?.onStopServer() }
+        closeAppButton.setOnClickListener { listener?.onCloseApp() }
+
+        isoSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) listener?.setIso(progress)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
+
+        shutterSpeedSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) listener?.setShutterSpeed(shutterSpeeds[progress])
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
+
+        captureRateSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) listener?.setCaptureRate(progress)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
+
+        captureLimitSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) listener?.setCaptureLimit(progress)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
+    }
+
+    fun onCameraReady() {
+        val activity = activity as? CaptureActivity
+        activity?.let {
+            updateUi()
+            updateArmingState(it.getIsArmed())
+        }
+    }
+
+    fun updateUi() {
+        val activity = activity as? CaptureActivity
+        activity?.let {
+            isoValueTextView.text = getString(R.string.iso_value_format, it.getIso())
+            isoSeekBar.progress = it.getIso()
+
+            val shutterInv = 1_000_000_000.0 / it.getShutterSpeed()
+            shutterSpeedValueTextView.text = getString(R.string.shutter_speed_value_format, shutterInv.toLong())
+            val shutterSpeedIndex = shutterSpeeds.indexOfFirst { speed -> speed <= it.getShutterSpeed() }
+            shutterSpeedSeekBar.progress = if (shutterSpeedIndex != -1) shutterSpeedIndex else 0
+
+            captureRateValueTextView.text = getString(R.string.capture_rate_format, it.getCaptureRate())
+            captureRateSeekBar.progress = it.getCaptureRate()
+
+            captureLimitValueTextView.text = getString(R.string.capture_limit_format, it.getCaptureLimit())
+            captureLimitSeekBar.progress = it.getCaptureLimit()
+
+            val shutterSpeedString = "1/${shutterInv.toLong()}"
+            val settingsText = "ISO: ${it.getIso()}\nS: $shutterSpeedString\nFPS: ${it.getCaptureRate()}\nLimit: ${it.getCaptureLimit()}"
+            settingsDisplayTextView.text = settingsText
+
+            projectNameTextView.text = getString(R.string.project_name_prefix, it.getProjectName())
+            cameraNameTextView.text = getString(R.string.camera_name_prefix, it.getCameraName())
+        }
+    }
+
+    fun updateArmingState(isArmed: Boolean) {
+        armButton.text = if (isArmed) "Disarm" else "Arm"
+        captureButton.isEnabled = isArmed
+        captureButton.alpha = if(isArmed) 1.0f else 0.5f
+    }
+
+    fun updateAutoIsoState(isAnalyzing: Boolean) {
+        if (isAnalyzing) {
+            analyzeSceneButton.text = "Cancel"
+            autoIsoIndicator.visibility = View.VISIBLE
+            autoIsoIndicator.animate().alpha(0f).setDuration(500).withEndAction {
+                autoIsoIndicator.animate().alpha(1f).setDuration(500).start()
+            }.start()
+        } else {
+            analyzeSceneButton.text = "Auto-ISO"
+            autoIsoIndicator.clearAnimation()
+            autoIsoIndicator.visibility = View.GONE
+        }
+    }
+
+    fun setCaptureCount(count: Int) {
+        // This view is no longer part of the layout
+    }
+
+    fun setClientList(clients: List<String>) {
+        val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_1, clients)
+        clientListView.adapter = adapter
+    }
+
+    fun updateHistogram(histogram: IntArray) {
+        histogramView.updateHistogram(histogram)
+    }
+
+    override fun onDetach() {
+        super.onDetach()
+        listener = null
+    }
+}
