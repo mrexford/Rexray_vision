@@ -16,11 +16,17 @@ class CaptureStateHandler(
 
     fun handleImage(image: Image) {
         val timestamp = image.timestamp
+
+        val buffer = byteBufferPool.acquire()
+        if (buffer == null) {
+            Log.w(tag, "handleImage - Dropping frame for timestamp $timestamp due to unavailable buffer.")
+            image.close()
+            return
+        }
+
         Log.d(tag, "handleImage - Timestamp: $timestamp. Pending results: ${pendingResults.size}, Pending buffers: ${pendingBuffers.size}")
 
-        var buffer: ByteBuffer? = null
         try {
-            buffer = byteBufferPool.acquire(image.width * image.height * 2) // Approximate size for RAW16
             val imageBuffer = image.planes[0].buffer
             val rowStride = image.planes[0].rowStride
             val pixelStride = image.planes[0].pixelStride
@@ -46,8 +52,6 @@ class CaptureStateHandler(
             }
         } finally {
             image.close()
-            // The buffer is now either in pendingBuffers or has been passed to onCaptureAvailable.
-            // It should not be released here.
         }
     }
 

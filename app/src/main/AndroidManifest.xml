@@ -40,6 +40,10 @@
             android:name=".NetworkService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".FileMigrationService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

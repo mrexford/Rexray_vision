@@ -15,7 +15,8 @@ The project is a standard Android application with a single `:app` module.
 *   **`RexrayCameraManager`**: A class that wraps the Camera2 API, simplifying camera setup and configuration.
 *   **`CameraSessionManager`**: Manages the `CameraCaptureSession` and handles capture requests.
 *   **`CaptureStateHandler`**: Manages the state of image capture, including pending buffers and results. Its buffer handling is designed to correctly handle row-stride in image data to prevent crashes.
-*   **`ImageSaver`**: A background service that saves captured RAW images to disk as DNG files using `DngCreator`. It acts as the consumer in a producer-consumer pattern.
+*   **`ImageSaver`**: A background component that saves captured RAW images to the app's internal cache as DNG files using `DngCreator`. It acts as the consumer in a producer-consumer pattern and tracks active disk write tasks via `StateFlow`.
+*   **`FileMigrationService`**: A foreground service responsible for sequentially moving saved DNG files from the app's internal cache to public storage (MediaStore) once capture and disk-writing are complete. It provides progress updates to the UI.
 *   **`ExposureAnalysisStrategy`**: An interface for different exposure analysis algorithms. The current implementation is `HistogramEttrAnalysisStrategy`, which uses a histogram-based approach to determine the correct exposure.
 *   **`ByteBufferPool`**: A utility class for pooling and reusing `ByteBuffer`s to reduce memory allocation and garbage collection overhead during high-speed capture.
 *   **`NetworkService`**: A foreground service for network discovery and communication between primary and client devices.

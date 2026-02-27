@@ -1,12 +1,12 @@
 package com.example.rexray_vision
 
 import android.content.Context
-import android.graphics.Color
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
@@ -52,6 +52,12 @@ class PrimaryControlsFragment : Fragment() {
     private lateinit var closeAppButton: Button
     private lateinit var autoIsoIndicator: TextView
 
+    // MIGRATION UI
+    private lateinit var migrationOverlay: ConstraintLayout
+    private lateinit var migrationStatusTextView: TextView
+    private lateinit var migrationProgressBar: ProgressBar
+    private lateinit var migrationProgressTextView: TextView
+
     private val shutterSpeeds = (200..1200 step 50).map { 1_000_000_000L / it }.toTypedArray()
 
     override fun onAttach(context: Context) {
@@ -90,6 +96,11 @@ class PrimaryControlsFragment : Fragment() {
         closeAppButton = view.findViewById(R.id.closeAppButton)
         autoIsoIndicator = view.findViewById(R.id.autoIsoIndicator)
 
+        migrationOverlay = view.findViewById(R.id.migrationOverlay)
+        migrationStatusTextView = view.findViewById(R.id.migrationStatusTextView)
+        migrationProgressBar = view.findViewById(R.id.migrationProgressBar)
+        migrationProgressTextView = view.findViewById(R.id.migrationProgressTextView)
+
         ViewCompat.setOnApplyWindowInsetsListener(view) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
@@ -109,7 +120,7 @@ class PrimaryControlsFragment : Fragment() {
         captureRateSeekBar.min = 3
         captureRateSeekBar.max = 15
         captureLimitSeekBar.min = 1
-        captureLimitSeekBar.max = 100
+        captureLimitSeekBar.max = 300
     }
 
     private fun setupListeners() {
@@ -160,6 +171,46 @@ class PrimaryControlsFragment : Fragment() {
         })
     }
 
+    fun updateDiskWriteProgress(pendingCount: Int) {
+        activity?.runOnUiThread {
+            if (pendingCount > 0) {
+                migrationOverlay.visibility = View.VISIBLE
+                migrationStatusTextView.text = getString(R.string.migration_finalizing_writes)
+                migrationProgressBar.isIndeterminate = true
+                migrationProgressTextView.text = getString(R.string.migration_remaining_format, pendingCount)
+                
+                // Block capture
+                armButton.isEnabled = false
+                captureButton.isEnabled = false
+            } else {
+                // If not migrating, hide. If migrating, the other method will handle visibility
+                if (migrationStatusTextView.text != getString(R.string.migration_moving_to_gallery)) {
+                    migrationOverlay.visibility = View.GONE
+                    updateArmingState((activity as? CaptureActivity)?.getIsArmed() ?: false)
+                }
+            }
+        }
+    }
+
+    fun updateMigrationProgress(isMigrating: Boolean, progress: Int) {
+        activity?.runOnUiThread {
+            if (isMigrating) {
+                migrationOverlay.visibility = View.VISIBLE
+                migrationStatusTextView.text = getString(R.string.migration_moving_to_gallery)
+                migrationProgressBar.isIndeterminate = false
+                migrationProgressBar.progress = progress
+                migrationProgressTextView.text = getString(R.string.migration_percentage_format, progress)
+                
+                // Block capture
+                armButton.isEnabled = false
+                captureButton.isEnabled = false
+            } else {
+                migrationOverlay.visibility = View.GONE
+                updateArmingState((activity as? CaptureActivity)?.getIsArmed() ?: false)
+            }
+        }
+    }
+
     fun onCameraReady() {
         val activity = activity as? CaptureActivity
         activity?.let {
@@ -195,6 +246,7 @@ class PrimaryControlsFragment : Fragment() {
     }
 
     fun updateArmingState(isArmed: Boolean) {
+        armButton.isEnabled = true
         armButton.text = if (isArmed) "Disarm" else "Arm"
         captureButton.isEnabled = isArmed
         captureButton.alpha = if(isArmed) 1.0f else 0.5f

@@ -16,8 +16,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -27,17 +29,21 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     private lateinit var role: String
 
     private var networkService: NetworkService? = null
+    private var migrationService: FileMigrationService? = null
     private var isBound = false
+    private var isMigrationBound = false
     private lateinit var sharedPreferences: SharedPreferences
     private var networkStateJob: Job? = null
+    private var migrationStateJob: Job? = null
 
     private val isArmed = AtomicBoolean(false)
     private lateinit var currentProjectName: String
     private lateinit var cameraName: String
     private var iso = 400
     private var shutterSpeed = 3333333L // 1/300s
-    private var captureRate = 5
-    private var captureLimit = 5
+    private var captureRate = 15
+    private var captureLimit = 30
+    private var dngWriterThreads = 4
 
     private var sessionCaptureCount = 0
 
@@ -66,6 +72,20 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         }
     }
 
+    private val migrationConnection = object : ServiceConnection {
+        override fun onServiceConnected(className: ComponentName, service: IBinder) {
+            val binder = service as FileMigrationService.MigrationBinder
+            migrationService = binder.getService()
+            isMigrationBound = true
+            observeMigrationState()
+        }
+
+        override fun onServiceDisconnected(arg0: ComponentName) {
+            isMigrationBound = false
+            migrationService = null
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_capture)
@@ -80,7 +100,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
 
         sharedPreferences = getSharedPreferences("RexrayVisionPrefs", Context.MODE_PRIVATE)
         Log.d(tag, "onCreate: Using default settings.")
-        // loadSettings() // Force default settings on startup
         Log.d(tag, "onCreate: Default settings: ISO=$iso, Shutter Speed=$shutterSpeed")
         setupNewProject(newProject)
         generateCameraName(false)
@@ -109,6 +128,10 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         Intent(this, NetworkService::class.java).also { intent ->
             bindService(intent, connection, Context.BIND_AUTO_CREATE)
         }
+        // Always attempt to bind to migration service in case it's running
+        Intent(this, FileMigrationService::class.java).also { intent ->
+            bindService(intent, migrationConnection, Context.BIND_AUTO_CREATE)
+        }
     }
 
     override fun onStop() {
@@ -116,6 +139,10 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         if (isBound) {
             unbindService(connection)
             isBound = false
+        }
+        if (isMigrationBound) {
+            unbindService(migrationConnection)
+            isMigrationBound = false
         }
     }
 
@@ -156,6 +183,30 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         }
     }
 
+    private fun observeMigrationState() {
+        migrationStateJob?.cancel()
+        migrationStateJob = lifecycleScope.launch {
+            val service = migrationService ?: return@launch
+            service.isMigrating.combine(service.migrationProgress) { isMigrating, progress ->
+                isMigrating to progress
+            }.collect { (isMigrating, progress) ->
+                if (role == "PRIMARY") {
+                    (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)
+                        ?.updateMigrationProgress(isMigrating, progress)
+                }
+            }
+        }
+    }
+
+    fun startMigrationService() {
+        val intent = Intent(this, FileMigrationService::class.java).apply {
+            action = FileMigrationService.ACTION_START_MIGRATION
+            putExtra(FileMigrationService.EXTRA_CACHE_DIR, File(filesDir, "dng_cache").absolutePath)
+        }
+        startForegroundService(intent)
+        bindService(intent, migrationConnection, Context.BIND_AUTO_CREATE)
+    }
+
     fun showLoading(message: String = "Processing...") {
         runOnUiThread {
             loadingStatus.text = message
@@ -173,7 +224,28 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         Log.d(tag, "onCameraReady: Applying initial settings to preview")
         updatePreview()
         if (role == "PRIMARY") {
-            runOnUiThread { (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.onCameraReady() }
+            runOnUiThread { 
+                val frag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment
+                frag?.onCameraReady() 
+                
+                // Also start observing ImageSaver's task count for handoff
+                val baseFrag = supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment
+                baseFrag?.let { bf ->
+                    lifecycleScope.launch {
+                        bf.getImageSaver().activeTaskCount.collect { count ->
+                            // Only update UI if we are actually waiting for migration to start
+                            if (bf.isAwaitingMigration()) {
+                                frag?.updateDiskWriteProgress(count)
+                            }
+
+                            if (count == 0 && bf.isAwaitingMigration()) {
+                                bf.markMigrationStarted()
+                                startMigrationService()
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -238,13 +310,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         cameraName = aName
     }
 
-    private fun loadSettings() {
-        iso = sharedPreferences.getInt("iso", 400)
-        shutterSpeed = sharedPreferences.getLong("shutterSpeed", 3333333L)
-        captureRate = sharedPreferences.getInt("captureRate", 5)
-        captureLimit = sharedPreferences.getInt("captureLimit", 5)
-    }
-
     fun getProjectName(): String = currentProjectName
     fun getCameraName(): String = cameraName
     fun getIsArmed(): Boolean = isArmed.get()
@@ -252,6 +317,7 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     fun getShutterSpeed(): Long = shutterSpeed
     fun getCaptureRate(): Int = captureRate
     fun getCaptureLimit(): Int = captureLimit
+    fun getDngWriterThreads(): Int = dngWriterThreads
 
     override fun setIso(value: Int) {
         Log.d(tag, "setIso: value=$value")

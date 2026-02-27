@@ -66,6 +66,9 @@ class BaseCaptureFragment : Fragment() {
     private var integral = 0.0
     private var previousError = 0.0
 
+    private val isAwaitingMigration = AtomicBoolean(false)
+    private var burstRotation = Surface.ROTATION_0
+
     // PID gains
     private val pGain = .8
     private val iGain = 0.01
@@ -84,14 +87,14 @@ class BaseCaptureFragment : Fragment() {
             val characteristics = cameraManager.getCameraCharacteristics(camera.id)
             val rawSize = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)[0]
             val bufferSize = rawSize.width * rawSize.height * 2
-            byteBufferPool = ByteBufferPool(bufferSize, 10)
-            imageSaver = ImageSaver(requireContext(), characteristics, byteBufferPool) { count ->
-                Log.d(tag, "ImageSaver reported $count images saved.")
-            }
+            byteBufferPool = ByteBufferPool(bufferSize, 30)
+            val dngWriterThreads = (activity as? CaptureActivity)?.getDngWriterThreads() ?: 1
+            imageSaver = ImageSaver(requireContext(), characteristics, byteBufferPool, {
+                // Redundant callback removed per Task 2
+            }, dngWriterThreads)
             imageSaver.start()
             captureStateHandler = CaptureStateHandler(::handleImageCapture, byteBufferPool)
             createCameraPreviewSession()
-            listener?.onCameraReady()
         }
 
         override fun onDisconnected(camera: CameraDevice) {
@@ -326,6 +329,8 @@ class BaseCaptureFragment : Fragment() {
     fun startBurstCapture(iso: Int, shutterSpeed: Long, captureRate: Int, captureLimit: Int) {
         Log.d(tag, "Starting burst capture.")
         capturedImageCount.set(0)
+        isAwaitingMigration.set(false)
+        burstRotation = activity?.windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
         captureStateHandler.clear()
         val captureCallback = object : CameraCaptureSession.CaptureCallback() {
             override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
@@ -348,7 +353,14 @@ class BaseCaptureFragment : Fragment() {
                 cameraSessionManager.stopBurstAndResumePreview(it.getIso(), it.getShutterSpeed())
             }
             captureStateHandler.clear()
+            isAwaitingMigration.set(true)
         }
+    }
+
+    fun getImageSaver(): ImageSaver = imageSaver
+    fun isAwaitingMigration(): Boolean = isAwaitingMigration.get()
+    fun markMigrationStarted() {
+        isAwaitingMigration.set(false)
     }
 
     private fun handleImageCapture(buffer: ByteBuffer, result: TotalCaptureResult) {
@@ -357,7 +369,7 @@ class BaseCaptureFragment : Fragment() {
         val count = capturedImageCount.incrementAndGet()
         val captureLimit = (activity as? CaptureActivity)?.getCaptureLimit() ?: 0
         if (count <= captureLimit) {
-            imageSaver.save(buffer, result)
+            imageSaver.save(buffer, result, burstRotation)
             listener?.onImageCaptured()
             if (count == captureLimit) {
                 Log.d(tag, "Capture limit reached.")

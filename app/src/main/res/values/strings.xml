@@ -36,4 +36,9 @@
     <string name="project_name_prefix">Project: %1$s</string>
     <string name="camera_name_prefix">Camera: %1$s</string>
     <string name="capture_limit_format">Limit: %d</string>
+
+    <string name="migration_finalizing_writes">Finalizing Disk Writes...</string>
+    <string name="migration_moving_to_gallery">Moving to Gallery...</string>
+    <string name="migration_remaining_format">%d remaining</string>
+    <string name="migration_percentage_format">%d%%</string>
 </resources>

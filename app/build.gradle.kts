@@ -47,6 +47,8 @@ dependencies {
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.androidx.exifinterface)
     implementation(libs.gson)
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
+    implementation("androidx.lifecycle:lifecycle-service:2.8.7")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
