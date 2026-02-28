@@ -4,10 +4,10 @@
     <selectionStates>
       <SelectionState runConfigName="app">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-02-27T19:19:51.991133Z">
+        <DropdownSelection timestamp="2026-02-28T19:46:50.694231300Z">
           <Target type="DEFAULT_BOOT">
             <handle>
-              <DeviceId pluginId="LocalEmulator" identifier="path=C:\Users\mrrex\.android\avd\emulated_6.avd" />
+              <DeviceId pluginId="PhysicalDevice" identifier="serial=1C101FDF600F26" />
             </handle>
           </Target>
         </DropdownSelection>
@@ -15,12 +15,12 @@
           <targets>
             <Target type="DEFAULT_BOOT">
               <handle>
-                <DeviceId pluginId="PhysicalDevice" identifier="serial=1C101FDF600F26" />
+                <DeviceId pluginId="PhysicalDevice" identifier="serial=48131FDAP0001N" />
               </handle>
             </Target>
             <Target type="DEFAULT_BOOT">
               <handle>
-                <DeviceId pluginId="LocalEmulator" identifier="path=C:\Users\mrrex\.android\avd\emulated_6.avd" />
+                <DeviceId pluginId="PhysicalDevice" identifier="serial=1C101FDF600F26" />
               </handle>
             </Target>
           </targets>

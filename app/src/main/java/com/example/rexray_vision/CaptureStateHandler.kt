@@ -24,6 +24,9 @@ class CaptureStateHandler(
             return
         }
 
+        // Explicit Hygiene: Ensure buffer is ready for writing from position 0.
+        buffer.clear()
+
         Log.d(tag, "handleImage - Timestamp: $timestamp. Pending results: ${pendingResults.size}, Pending buffers: ${pendingBuffers.size}")
 
         try {
@@ -33,6 +36,14 @@ class CaptureStateHandler(
 
             // Efficient, zero-allocation row-by-row copy
             val rowWidthInBytes = image.width * pixelStride
+            
+            // Safety Check: Verify buffer has enough capacity for the actual image layout (including strides)
+            if (buffer.remaining() < (rowStride * image.height)) {
+                Log.e(tag, "handleImage - Buffer capacity (${buffer.capacity()}) is smaller than required image layout (${rowStride * image.height})")
+                byteBufferPool.release(buffer)
+                return
+            }
+
             for (y in 0 until image.height) {
                 val rowOffset = y * rowStride
                 imageBuffer.position(rowOffset)

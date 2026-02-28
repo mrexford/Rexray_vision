@@ -30,6 +30,9 @@ class RexrayClient(
                 clientSocket = socket
                 _isConnected.value = true
                 
+                // Immediately register with the server to be added to the broadcast list
+                send(NetworkService.Message.JoinGroup(""))
+                
                 listen(socket)
             } catch (e: Exception) {
                 Log.e(TAG, "Connection failed", e)
@@ -45,12 +48,14 @@ class RexrayClient(
                 val reader = socket.getInputStream().bufferedReader()
                 while (socket.isConnected && !socket.isClosed) {
                     val line = reader.readLine() ?: break
+                    Log.d(TAG, "RAW JSON Received: $line")
                     val message = gson.fromJson(line, NetworkService.Message::class.java)
                     onMessageReceived(message)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Listen error", e)
             } finally {
+                Log.w(TAG, "Socket closed or stream ended.")
                 _isConnected.value = false
                 try { socket.close() } catch (_: Exception) {}
                 onConnectionLost()
@@ -76,6 +81,9 @@ class RexrayClient(
 
     fun disconnect() {
         try {
+            // Try to notify the server before closing
+            send(NetworkService.Message.LeaveGroup)
+
             clientSocket?.close()
             clientSocket = null
             _isConnected.value = false

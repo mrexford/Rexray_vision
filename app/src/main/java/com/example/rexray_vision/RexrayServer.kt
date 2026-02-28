@@ -13,7 +13,8 @@ import java.util.concurrent.ExecutorService
 class RexrayServer(
     private val executor: ExecutorService,
     private val gson: Gson,
-    private val onMessageReceived: (Socket, NetworkService.Message) -> Unit
+    private val onMessageReceived: (Socket, NetworkService.Message) -> Unit,
+    private val onClientConnected: (Socket) -> Unit = {}
 ) {
     private val TAG = "RexrayServer"
     private var serverSocket: ServerSocket? = null
@@ -64,14 +65,18 @@ class RexrayServer(
                 val reader = socket.getInputStream().bufferedReader()
                 while (socket.isConnected && !socket.isClosed) {
                     val line = reader.readLine() ?: break
+                    Log.d(TAG, "Incoming from $address: $line")
                     val message = gson.fromJson(line, NetworkService.Message::class.java)
                     
                     when (message) {
                         is NetworkService.Message.JoinGroup -> {
+                            Log.i(TAG, "Client $address joined group")
                             val status = NetworkService.ClientStatus(socket, 0, false)
                             _connectedClients.update { it + (socket to status) }
+                            onClientConnected(socket)
                         }
                         is NetworkService.Message.LeaveGroup -> {
+                            Log.i(TAG, "Client $address requested to leave")
                             _connectedClients.update { it - socket }
                             socket.close()
                             break
@@ -112,13 +117,17 @@ class RexrayServer(
 
     fun broadcast(message: NetworkService.Message) {
         val json = gson.toJson(message)
-        _connectedClients.value.values.forEach { client ->
+        val clients = _connectedClients.value.values
+        Log.d(TAG, "Broadcasting to ${clients.size} clients: $json")
+        
+        clients.forEach { client ->
             executor.execute {
                 try {
                     val writer = client.socket.getOutputStream().bufferedWriter()
                     writer.write(json)
                     writer.newLine()
                     writer.flush()
+                    Log.d(TAG, "Successfully sent to ${client.socket.inetAddress}")
                 } catch (e: IOException) {
                     Log.e(TAG, "Error sending to ${client.socket.inetAddress}", e)
                 }

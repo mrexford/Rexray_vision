@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -15,7 +16,9 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.gson.GsonBuilder
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -29,7 +32,10 @@ class NetworkService : Service() {
 
     private val TAG = "NetworkService"
     private val nsdManager by lazy { getSystemService(Context.NSD_SERVICE) as NsdManager }
-    private val serviceType = "_rexrayvision._tcp."
+    private val wifiManager by lazy { applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager }
+    private var multicastLock: WifiManager.MulticastLock? = null
+
+    private val serviceType = "_rexrayvision._tcp"
     var serviceName: String? = null
     private val executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 2)
     private val scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(1)
@@ -96,8 +102,9 @@ class NetworkService : Service() {
         else flowOf(emptyMap())
     }
     
-    private val _incomingMessages = MutableStateFlow<Pair<Socket?, Message>?>(null)
-    val incomingMessages = _incomingMessages.asStateFlow()
+    // Event-based Flow for commands to ensure rapid sequential events (e.g. Arm -> Start) are not dropped.
+    private val _incomingMessages = MutableSharedFlow<Pair<Socket?, Message>>(extraBufferCapacity = 64)
+    val incomingMessages = _incomingMessages.asSharedFlow()
 
     val isConnectedToPrimary = _isReady.flatMapLatest { ready ->
         if (ready) client?.isConnected ?: flowOf(false)
@@ -124,6 +131,7 @@ class NetworkService : Service() {
         object LeaveGroup : Message()
         data class CommandAck(val commandId: String) : Message()
         object ConnectionRejected : Message()
+        object SyncTrigger : Message() // Internal use
     }
 
     inner class NetworkBinder : Binder() {
@@ -142,9 +150,11 @@ class NetworkService : Service() {
         
         executor.execute {
             try {
-                val s = RexrayServer(executor, gson) { socket, message -> 
-                    _incomingMessages.value = socket to message
-                }
+                val s = RexrayServer(executor, gson, { socket, message -> 
+                    _incomingMessages.tryEmit(socket to message)
+                }, { socket ->
+                    _incomingMessages.tryEmit(socket to Message.SyncTrigger)
+                })
                 val c = RexrayClient(executor, gson, { message ->
                     handlePrimaryMessage(message)
                 }, {
@@ -178,6 +188,7 @@ class NetworkService : Service() {
         client?.disconnect()
         stopDiscovery()
         unregisterService()
+        releaseMulticastLock()
         executor.shutdown()
         scheduler.shutdown()
     }
@@ -195,7 +206,7 @@ class NetworkService : Service() {
             is Message.DisarmCapture -> _isArmed.value = false
             else -> {}
         }
-        _incomingMessages.value = null to message
+        _incomingMessages.tryEmit(null to message)
     }
 
     fun setCameraName(name: String) {
@@ -210,6 +221,29 @@ class NetworkService : Service() {
     fun updateCaptureRate(value: Int) { _captureRate.value = value }
     fun updateCaptureLimit(value: Int) { _captureLimit.value = value }
     fun updateArmingStatus(armed: Boolean) { _isArmed.value = armed }
+
+    private fun acquireMulticastLock() {
+        if (multicastLock == null) {
+            multicastLock = wifiManager.createMulticastLock("RexrayVisionMulticastLock").apply {
+                setReferenceCounted(true)
+            }
+        }
+        multicastLock?.let {
+            if (!it.isHeld) {
+                Log.d(TAG, "Acquiring MulticastLock")
+                it.acquire()
+            }
+        }
+    }
+
+    private fun releaseMulticastLock() {
+        multicastLock?.let {
+            if (it.isHeld) {
+                Log.d(TAG, "Releasing MulticastLock")
+                it.release()
+            }
+        }
+    }
 
     fun registerService(port: Int, name: String) {
         if (!_isReady.value) {
@@ -239,9 +273,15 @@ class NetworkService : Service() {
                     this@NetworkService.serviceName = nsdServiceInfo.serviceName
                     Log.d(TAG, "Service registered: ${this@NetworkService.serviceName}")
                 }
-                override fun onRegistrationFailed(s: NsdServiceInfo, e: Int) {}
-                override fun onServiceUnregistered(s: NsdServiceInfo) {}
-                override fun onUnregistrationFailed(s: NsdServiceInfo, e: Int) {}
+                override fun onRegistrationFailed(s: NsdServiceInfo, e: Int) {
+                    Log.e(TAG, "Registration failed: $e")
+                }
+                override fun onServiceUnregistered(s: NsdServiceInfo) {
+                    Log.d(TAG, "Service unregistered")
+                }
+                override fun onUnregistrationFailed(s: NsdServiceInfo, e: Int) {
+                    Log.e(TAG, "Unregistration failed: $e")
+                }
             }
 
             nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
@@ -256,10 +296,15 @@ class NetworkService : Service() {
     }
 
     fun discoverServices() {
+        Log.d(TAG, "Starting service discovery for type: $serviceType")
+        acquireMulticastLock()
         _discoveredServices.value = emptyList()
         discoveryListener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(regType: String) {}
+            override fun onDiscoveryStarted(regType: String) {
+                Log.d(TAG, "Discovery started: $regType")
+            }
             override fun onServiceFound(service: NsdServiceInfo) {
+                Log.d(TAG, "Service found: ${service.serviceName}")
                 if (!_discoveredServices.value.any { it.serviceName == service.serviceName }) {
                      val list = _discoveredServices.value.toMutableList()
                      list.add(service)
@@ -267,26 +312,40 @@ class NetworkService : Service() {
                 }
             }
             override fun onServiceLost(service: NsdServiceInfo) {
+                Log.d(TAG, "Service lost: ${service.serviceName}")
                 val list = _discoveredServices.value.toMutableList()
                 list.removeAll { it.serviceName == service.serviceName }
                 _discoveredServices.value = list
             }
-            override fun onDiscoveryStopped(s: String) {}
-            override fun onStartDiscoveryFailed(s: String, e: Int) {}
-            override fun onStopDiscoveryFailed(s: String, e: Int) {}
+            override fun onDiscoveryStopped(s: String) {
+                Log.d(TAG, "Discovery stopped: $s")
+                releaseMulticastLock()
+            }
+            override fun onStartDiscoveryFailed(s: String, e: Int) {
+                Log.e(TAG, "Start discovery failed: $e")
+                releaseMulticastLock()
+            }
+            override fun onStopDiscoveryFailed(s: String, e: Int) {
+                Log.e(TAG, "Stop discovery failed: $e")
+            }
         }
         nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
     }
 
     fun stopDiscovery() {
+        Log.d(TAG, "Stopping service discovery")
         discoveryListener?.let { nsdManager.stopServiceDiscovery(it) }
         discoveryListener = null
     }
 
     fun resolveService(serviceInfo: NsdServiceInfo) {
+        Log.d(TAG, "Resolving service: ${serviceInfo.serviceName}")
         nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
-            override fun onResolveFailed(s: NsdServiceInfo, e: Int) {}
+            override fun onResolveFailed(s: NsdServiceInfo, e: Int) {
+                Log.e(TAG, "Resolve failed for ${s.serviceName}: $e")
+            }
             override fun onServiceResolved(resolvedInfo: NsdServiceInfo) {
+                Log.d(TAG, "Service resolved: ${resolvedInfo.serviceName} at ${resolvedInfo.host}:${resolvedInfo.port}")
                 connectToPrimary(resolvedInfo)
             }
         })
@@ -302,11 +361,13 @@ class NetworkService : Service() {
         }
         if (_serviceRole.value == ServiceRole.CLIENT) return
         
+        Log.d(TAG, "Connecting to Primary: ${serviceInfo.host.hostAddress}:${serviceInfo.port}")
         client?.connect(serviceInfo.host.hostAddress!!, serviceInfo.port)
         _serviceRole.value = ServiceRole.CLIENT
     }
 
     fun disconnectFromPrimary() {
+        Log.d(TAG, "Disconnecting from Primary")
         stopSendingStatusUpdates()
         client?.send(Message.LeaveGroup)
         client?.disconnect()
@@ -315,6 +376,7 @@ class NetworkService : Service() {
 
     fun broadcastMessage(message: Message) {
         if (_serviceRole.value == ServiceRole.PRIMARY) {
+            Log.d(TAG, "Attempting to broadcast message: $message")
             server?.broadcast(message)
         }
     }

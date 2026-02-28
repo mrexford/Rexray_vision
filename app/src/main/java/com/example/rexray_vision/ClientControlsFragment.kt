@@ -6,7 +6,9 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
@@ -22,6 +24,14 @@ class ClientControlsFragment : Fragment() {
     private lateinit var leaveServerButton: Button
     private lateinit var projectNameTextView: TextView
     private lateinit var cameraNameTextView: TextView
+    private lateinit var captureCounter: TextView
+    private lateinit var settingsDisplayTextView: TextView
+
+    // MIGRATION UI
+    private lateinit var migrationOverlay: ConstraintLayout
+    private lateinit var migrationStatusTextView: TextView
+    private lateinit var migrationProgressBar: ProgressBar
+    private lateinit var migrationProgressTextView: TextView
 
     override fun onAttach(context: Context) {
         super.onAttach(context)
@@ -41,6 +51,13 @@ class ClientControlsFragment : Fragment() {
         leaveServerButton = view.findViewById(R.id.leaveServerButton)
         projectNameTextView = view.findViewById(R.id.projectNameTextView)
         cameraNameTextView = view.findViewById(R.id.cameraNameTextView)
+        captureCounter = view.findViewById(R.id.captureCounter)
+        settingsDisplayTextView = view.findViewById(R.id.settingsDisplayTextView)
+
+        migrationOverlay = view.findViewById(R.id.migrationOverlay)
+        migrationStatusTextView = view.findViewById(R.id.migrationStatusTextView)
+        migrationProgressBar = view.findViewById(R.id.migrationProgressBar)
+        migrationProgressTextView = view.findViewById(R.id.migrationProgressTextView)
 
         leaveServerButton.setOnClickListener { listener?.onLeaveServer() }
 
@@ -58,6 +75,61 @@ class ClientControlsFragment : Fragment() {
         activity?.let {
             projectNameTextView.text = getString(R.string.project_name_client_format, it.getProjectName())
             cameraNameTextView.text = getString(R.string.camera_name_client_format, it.getCameraName())
+
+            val shutterInv = 1_000_000_000.0 / it.getShutterSpeed()
+            val shutterSpeedString = "1/${shutterInv.toLong()}"
+            val settingsText = "ISO: ${it.getIso()}\nS: $shutterSpeedString\nFPS: ${it.getCaptureRate()}\nLimit: ${it.getCaptureLimit()}"
+            settingsDisplayTextView.text = settingsText
+        }
+    }
+
+    fun updateCaptureCount(count: Int) {
+        activity?.runOnUiThread {
+            if (::captureCounter.isInitialized) {
+                captureCounter.text = count.toString()
+                if (count > 0) captureCounter.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    fun updateCaptureState(isCapturing: Boolean) {
+        activity?.runOnUiThread {
+            if (::captureCounter.isInitialized) {
+                captureCounter.visibility = if (isCapturing || captureCounter.text.toString().toIntOrNull() ?: 0 > 0) View.VISIBLE else View.INVISIBLE
+            }
+        }
+    }
+
+    fun updateDiskWriteProgress(pendingCount: Int) {
+        activity?.runOnUiThread {
+            if (!::migrationOverlay.isInitialized) return@runOnUiThread
+            
+            if (pendingCount > 0) {
+                migrationOverlay.visibility = View.VISIBLE
+                migrationStatusTextView.text = getString(R.string.migration_finalizing_writes)
+                migrationProgressBar.isIndeterminate = true
+                migrationProgressTextView.text = getString(R.string.migration_remaining_format, pendingCount)
+            } else {
+                if (migrationStatusTextView.text != getString(R.string.migration_moving_to_gallery)) {
+                    migrationOverlay.visibility = View.GONE
+                }
+            }
+        }
+    }
+
+    fun updateMigrationProgress(isMigrating: Boolean, progress: Int) {
+        activity?.runOnUiThread {
+            if (!::migrationOverlay.isInitialized) return@runOnUiThread
+
+            if (isMigrating) {
+                migrationOverlay.visibility = View.VISIBLE
+                migrationStatusTextView.text = getString(R.string.migration_moving_to_gallery)
+                migrationProgressBar.isIndeterminate = false
+                migrationProgressBar.progress = progress
+                migrationProgressTextView.text = getString(R.string.migration_percentage_format, progress)
+            } else {
+                migrationOverlay.visibility = View.GONE
+            }
         }
     }
 

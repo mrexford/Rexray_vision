@@ -85,16 +85,27 @@ class BaseCaptureFragment : Fragment() {
             Log.d(tag, "Camera device opened.")
             rexrayCameraManager.cameraDevice = camera
             val characteristics = cameraManager.getCameraCharacteristics(camera.id)
-            val rawSize = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)[0]
-            val bufferSize = rawSize.width * rawSize.height * 2
-            byteBufferPool = ByteBufferPool(bufferSize, 30)
-            val dngWriterThreads = (activity as? CaptureActivity)?.getDngWriterThreads() ?: 1
-            imageSaver = ImageSaver(requireContext(), characteristics, byteBufferPool, {
-                // Redundant callback removed per Task 2
-            }, dngWriterThreads)
-            imageSaver.start()
-            captureStateHandler = CaptureStateHandler(::handleImageCapture, byteBufferPool)
-            createCameraPreviewSession()
+            val configurationMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val rawSize = configurationMap?.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)?.get(0)
+            
+            if (rawSize != null) {
+                // Calculation Fix: Use 2.5 bytes per pixel (25% overhead) to accommodate hardware stride padding
+                // and non-standard packing formats found on physical hardware (e.g. Pixel 6).
+                val bufferSize = (rawSize.width * rawSize.height * 2.5).toInt()
+                Log.d(tag, "Initializing ByteBufferPool for RAW capture. Size: $rawSize, BufferSize: $bufferSize bytes")
+                byteBufferPool = ByteBufferPool(bufferSize, 30)
+                
+                val dngWriterThreads = (activity as? CaptureActivity)?.getDngWriterThreads() ?: 1
+                imageSaver = ImageSaver(requireContext(), characteristics, byteBufferPool, {}, dngWriterThreads)
+                imageSaver.start()
+                captureStateHandler = CaptureStateHandler(::handleImageCapture, byteBufferPool)
+                createCameraPreviewSession()
+            } else {
+                Log.e(tag, "Failed to get RAW_SENSOR output sizes.")
+                activity?.runOnUiThread {
+                    Toast.makeText(requireContext(), "RAW Capture not supported on this device.", Toast.LENGTH_LONG).show()
+                }
+            }
         }
 
         override fun onDisconnected(camera: CameraDevice) {
@@ -174,9 +185,6 @@ class BaseCaptureFragment : Fragment() {
 
     override fun onStop() {
         super.onStop()
-        // GRACEFUL BACKGROUNDING:
-        // Move camera closing to the background executor to avoid blocking the main thread (fixes 252ms contention).
-        // Only stop ImageSaver if there are NO active background writes pending.
         Log.d(tag, "onStop: Backgrounding camera resources asynchronously.")
         
         cameraExecutor.execute {
@@ -186,8 +194,6 @@ class BaseCaptureFragment : Fragment() {
                     rexrayCameraManager.closeCamera()
                 }
                 
-                // Only stop the ImageSaver if it's not currently busy.
-                // If it IS busy, it will finish its work and we should not interrupt the threads.
                 if (::imageSaver.isInitialized) {
                     if (imageSaver.activeTaskCount.value == 0) {
                         Log.d(tag, "ImageSaver is idle, stopping.")
@@ -266,7 +272,7 @@ class BaseCaptureFragment : Fragment() {
 
     private fun analyzeHistogram(histogram: IntArray) {
         val currentTime = System.currentTimeMillis()
-        if (autoIsoEnabled.get() && (currentTime - lastAnalysisTimestamp > 100)) { // faster updates
+        if (autoIsoEnabled.get() && (currentTime - lastAnalysisTimestamp > 100)) { 
             lastAnalysisTimestamp = currentTime
 
             val totalPixels = histogram.sum()
@@ -287,7 +293,7 @@ class BaseCaptureFragment : Fragment() {
 
             if (abs(error) < 4) {
                 stableIsoCounter++
-                if (stableIsoCounter >= 20) { // 20 * 100ms = 2 seconds
+                if (stableIsoCounter >= 20) { 
                     toggleAutoIso()
                     return
                 }
@@ -303,16 +309,14 @@ class BaseCaptureFragment : Fragment() {
             val isoAdjustment = unCappedAdjustment.roundToInt()
             val newIso = (currentIso + isoAdjustment).coerceIn(50, 1000)
 
-            // Anti-windup and saturation lock
             if (newIso == 1000 && percentileValue < targetLuminance) {
                 maxIsoCounter++
-                if (maxIsoCounter >= 20) { // 20 * 100ms = 2s
+                if (maxIsoCounter >= 20) { 
                     toggleAutoIso()
                     return
                 }
             } else {
                 maxIsoCounter = 0
-                // Only accumulate integral if not saturated
                 if (newIso > 50 && newIso < 1000) {
                     integral += error
                 }
@@ -321,7 +325,9 @@ class BaseCaptureFragment : Fragment() {
             previousError = error
 
             if (newIso != currentIso) {
-                (activity as? CaptureActivity)?.setIso(newIso)
+                // Modified: Only update internal state, do not trigger immediate broadcast
+                (activity as? CaptureActivity)?.networkService?.updateIso(newIso)
+                (activity as? CaptureActivity)?.updatePreview()
             }
         }
     }
@@ -335,13 +341,20 @@ class BaseCaptureFragment : Fragment() {
             maxIsoCounter = 0
             integral = 0.0
             previousError = 0.0
+        } else {
+            // Send final sync when disabled
+            (activity as? CaptureActivity)?.broadcastSettings()
         }
         listener?.onAutoIsoStateChanged(newState)
         Log.d(tag, "Auto-ISO enabled: $newState")
     }
 
     fun updatePreview(iso: Int, shutterSpeed: Long) {
-        cameraSessionManager.updatePreview(iso, shutterSpeed)
+        try {
+            cameraSessionManager.updatePreview(iso, shutterSpeed)
+        } catch (e: IllegalStateException) {
+            Log.w(tag, "updatePreview called on closed session. Ignoring.")
+        }
     }
 
     fun startBurstCapture(iso: Int, shutterSpeed: Long, captureRate: Int, captureLimit: Int) {
@@ -430,11 +443,7 @@ class BaseCaptureFragment : Fragment() {
         cameraExecutor = Executors.newSingleThreadExecutor()
     }
 
-    private fun stopBackgroundThread() {
-        // We do NOT call quitSafely() here anymore if called from onStop asynchronously,
-        // because the async block is RUNNING on the executor.
-        // Instead, we let the executor shutdown naturally or via activity destruction.
-    }
+    private fun stopBackgroundThread() {}
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)

@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.io.File
+import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -28,7 +29,9 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     private val tag = "CaptureActivity"
     private lateinit var role: String
 
-    private var networkService: NetworkService? = null
+    var networkService: NetworkService? = null
+        private set
+        
     private var migrationService: FileMigrationService? = null
     private var isBound = false
     private var isMigrationBound = false
@@ -72,10 +75,11 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             isBound = false
             networkService = null
             Toast.makeText(this@CaptureActivity, "Network service connection lost", Toast.LENGTH_LONG).show()
+            finish()
         }
     }
 
-    private val migrationConnection = object : ServiceConnection {
+    private val migrationServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
             val binder = service as FileMigrationService.MigrationBinder
             migrationService = binder.getService()
@@ -128,7 +132,7 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             bindService(intent, connection, Context.BIND_AUTO_CREATE)
         }
         Intent(this, FileMigrationService::class.java).also { intent ->
-            bindService(intent, migrationConnection, Context.BIND_AUTO_CREATE)
+            bindService(intent, migrationServiceConnection, Context.BIND_AUTO_CREATE)
         }
     }
 
@@ -139,7 +143,7 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             isBound = false
         }
         if (isMigrationBound) {
-            unbindService(migrationConnection)
+            unbindService(migrationServiceConnection)
             isMigrationBound = false
         }
     }
@@ -149,12 +153,15 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         networkStateJob = lifecycleScope.launch {
             val ns = networkService ?: return@launch
             
-            // Observe Role-specific health
+            // Observe connection health
             launch {
-                if (role == "CLIENT") {
-                    ns.isConnectedToPrimary.collect { isConnected ->
-                        // Only finish if we were connected and then lost it
-                        // (Wait for binding to finish)
+                ns.isConnectedToPrimary.collect { isConnected ->
+                    if (role == "CLIENT" && !isConnected) {
+                        Log.w(tag, "Connection to Primary lost. Returning to setup.")
+                        runOnUiThread {
+                            Toast.makeText(this@CaptureActivity, "Server connection lost", Toast.LENGTH_SHORT).show()
+                            finish()
+                        }
                     }
                 }
             }
@@ -179,17 +186,36 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
                 }
             }
 
-            // Handle Incoming Commands (Internal Commands)
+            // Sync Client List
+            launch {
+                ns.connectedClients.collect { clients ->
+                    if (role == "PRIMARY") {
+                        val names = clients.values.map { it.cameraName.ifEmpty { it.socket.inetAddress.hostAddress ?: "Unknown" } }
+                        (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.setClientList(names)
+                    }
+                }
+            }
+
+            // Handle Incoming Commands (Event-based stream)
             launch {
                 ns.incomingMessages.collect { messagePair ->
-                    messagePair?.let { (_, message) ->
-                        when (message) {
-                            is NetworkService.Message.ArmCapture -> onArmCapture(false)
-                            is NetworkService.Message.DisarmCapture -> onDisarmCapture(false)
-                            is NetworkService.Message.StartCapture -> onStartCapture()
-                            is NetworkService.Message.StopCapture -> onStopCapture()
-                            else -> {}
+                    val (socket, message) = messagePair
+                    Log.d(tag, "Network Message Received: $message from ${socket?.inetAddress?.hostAddress ?: "Self/Server"}")
+                    
+                    when (message) {
+                        is NetworkService.Message.ArmCapture -> onArmCapture(false)
+                        is NetworkService.Message.DisarmCapture -> onDisarmCapture(false)
+                        is NetworkService.Message.StartCapture -> executeStartCapture(true)
+                        is NetworkService.Message.StopCapture -> executeStopCapture(true)
+                        is NetworkService.Message.SyncTrigger -> {
+                            if (role == "PRIMARY") broadcastSettings()
                         }
+                        is NetworkService.Message.LeaveGroup -> {
+                            if (role == "PRIMARY") {
+                                Log.i(tag, "Client requested to leave group.")
+                            }
+                        }
+                        else -> {}
                     }
                 }
             }
@@ -205,9 +231,13 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             service.isMigrating.combine(service.migrationProgress) { isMigrating, progress ->
                 isMigrating to progress
             }.collect { (isMigrating, progress) ->
+                val primaryFrag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment
+                val clientFrag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment
+                
                 if (role == "PRIMARY") {
-                    (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)
-                        ?.updateMigrationProgress(isMigrating, progress)
+                    primaryFrag?.updateMigrationProgress(isMigrating, progress)
+                } else {
+                    clientFrag?.updateMigrationProgress(isMigrating, progress)
                 }
             }
         }
@@ -219,7 +249,7 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             putExtra(FileMigrationService.EXTRA_CACHE_DIR, File(filesDir, "dng_cache").absolutePath)
         }
         startForegroundService(intent)
-        bindService(intent, migrationConnection, Context.BIND_AUTO_CREATE)
+        bindService(intent, migrationServiceConnection, Context.BIND_AUTO_CREATE)
     }
 
     fun showLoading(message: String = "Processing...") {
@@ -238,22 +268,23 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     override fun onCameraReady() {
         Log.d(tag, "onCameraReady: Applying Master Service settings to preview")
         updatePreview()
-        if (role == "PRIMARY") {
-            runOnUiThread { 
-                val frag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment
-                frag?.onCameraReady() 
-                
-                val baseFrag = supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment
-                baseFrag?.let { bf ->
-                    lifecycleScope.launch {
-                        bf.getImageSaver().activeTaskCount.collect { count ->
-                            if (bf.isAwaitingMigration()) {
-                                frag?.updateDiskWriteProgress(count)
-                            }
-                            if (count == 0 && bf.isAwaitingMigration()) {
-                                bf.markMigrationStarted()
-                                startMigrationService()
-                            }
+        runOnUiThread { 
+            val primaryFrag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment
+            val clientFrag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment
+            
+            primaryFrag?.onCameraReady() 
+            
+            val baseFrag = supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment
+            baseFrag?.let { bf ->
+                lifecycleScope.launch {
+                    bf.getImageSaver().activeTaskCount.collect { count ->
+                        if (bf.isAwaitingMigration()) {
+                            primaryFrag?.updateDiskWriteProgress(count)
+                            clientFrag?.updateDiskWriteProgress(count)
+                        }
+                        if (count == 0 && bf.isAwaitingMigration()) {
+                            bf.markMigrationStarted()
+                            startMigrationService()
                         }
                     }
                 }
@@ -264,6 +295,10 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     override fun onImageCaptured() {
         sessionCaptureCount++
         updateCaptureCounter()
+        if (role == "CLIENT") {
+            networkService?.currentImageCount = sessionCaptureCount
+            networkService?.sendStatusUpdate()
+        }
     }
 
     override fun onCaptureLimitReached() {
@@ -271,8 +306,12 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     }
 
     private fun updateCaptureCounter() {
-        if (role == "PRIMARY") {
-            (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureCount(sessionCaptureCount)
+        runOnUiThread {
+            if (role == "PRIMARY") {
+                (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureCount(sessionCaptureCount)
+            } else {
+                (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment)?.updateCaptureCount(sessionCaptureCount)
+            }
         }
     }
 
@@ -375,38 +414,58 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
 
     override fun onArmCapture(broadcast: Boolean) {
         networkService?.updateArmingStatus(true)
+        if (role == "CLIENT") networkService?.isClientArmed = true
         if (broadcast) networkService?.broadcastMessage(NetworkService.Message.ArmCapture(UUID.randomUUID().toString()))
     }
 
     override fun onDisarmCapture(broadcast: Boolean) {
         networkService?.updateArmingStatus(false)
+        if (role == "CLIENT") networkService?.isClientArmed = false
         if (broadcast) networkService?.broadcastMessage(NetworkService.Message.DisarmCapture(UUID.randomUUID().toString()))
     }
 
     override fun onStartCapture() {
-        if (getIsArmed()) {
+        executeStartCapture(false)
+    }
+
+    override fun onStopCapture() {
+        executeStopCapture(false)
+    }
+
+    private fun executeStartCapture(isNetworkTriggered: Boolean) {
+        Log.d(tag, "executeStartCapture: networkTriggered=$isNetworkTriggered, isArmed=${getIsArmed()}")
+        if (getIsArmed() || isNetworkTriggered) {
             runOnUiThread { 
                 captureInProgressBorder.visibility = View.VISIBLE 
+                sessionCaptureCount = 0
+                updateCaptureCounter()
                 if (role == "PRIMARY") {
                     (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureState(true)
-                    sessionCaptureCount = 0
-                    updateCaptureCounter()
+                } else {
+                    (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment)?.updateCaptureState(true)
                 }
             }
-            networkService?.broadcastMessage(NetworkService.Message.StartCapture(UUID.randomUUID().toString()))
+            if (role == "PRIMARY" && !isNetworkTriggered) {
+                networkService?.broadcastMessage(NetworkService.Message.StartCapture(UUID.randomUUID().toString()))
+            }
             (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.startBurstCapture(getIso(), getShutterSpeed(), getCaptureRate(), getCaptureLimit())
         }
     }
 
-    override fun onStopCapture() {
+    private fun executeStopCapture(isNetworkTriggered: Boolean) {
+        Log.d(tag, "executeStopCapture: networkTriggered=$isNetworkTriggered")
         runOnUiThread { 
             captureInProgressBorder.visibility = View.GONE 
             if (role == "PRIMARY") {
                 (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureState(false)
-                onDisarmCapture(true)
+                if (!isNetworkTriggered) onDisarmCapture(true)
+            } else {
+                (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment)?.updateCaptureState(false)
             }
         }
-        networkService?.broadcastMessage(NetworkService.Message.StopCapture(UUID.randomUUID().toString()))
+        if (role == "PRIMARY" && !isNetworkTriggered) {
+            networkService?.broadcastMessage(NetworkService.Message.StopCapture(UUID.randomUUID().toString()))
+        }
         (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.stopBurstCapture()
     }
 

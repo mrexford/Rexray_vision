@@ -294,8 +294,10 @@ class PrimaryControlsFragment : Fragment() {
     }
 
     fun setClientList(clients: List<String>) {
-        val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_1, clients)
-        clientListView.adapter = adapter
+        activity?.runOnUiThread {
+            val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_1, clients)
+            clientListView.adapter = adapter
+        }
     }
 
     fun updateHistogram(histogram: IntArray) {
