@@ -45,7 +45,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
 
     private lateinit var loadingIndicator: FrameLayout
     private lateinit var loadingStatus: TextView
-    private lateinit var captureCounter: TextView
     private lateinit var captureInProgressBorder: View
 
     private val connection = object : ServiceConnection {
@@ -99,15 +98,12 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
 
         loadingIndicator = findViewById(R.id.loadingIndicator)
         loadingStatus = findViewById(R.id.loadingStatus)
-        captureCounter = findViewById(R.id.captureCounter)
         captureInProgressBorder = findViewById(R.id.captureInProgressBorder)
 
         sharedPreferences = getSharedPreferences("RexrayVisionPrefs", Context.MODE_PRIVATE)
         
         setupNewProject(newProject)
         generateCameraName(false)
-
-        updateCaptureCounter()
 
         if (savedInstanceState == null) {
             supportFragmentManager.beginTransaction()
@@ -177,10 +173,8 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             // Sync Armed Status
             launch {
                 ns.isArmed.collect { armed ->
-                    if (armed) {
-                        (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateArmingState(true)
-                    } else {
-                        (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateArmingState(false)
+                    if (role == "PRIMARY") {
+                        (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateArmingState(armed)
                     }
                 }
             }
@@ -277,8 +271,8 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     }
 
     private fun updateCaptureCounter() {
-        runOnUiThread {
-            captureCounter.text = sessionCaptureCount.toString()
+        if (role == "PRIMARY") {
+            (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureCount(sessionCaptureCount)
         }
     }
 
@@ -391,14 +385,27 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
 
     override fun onStartCapture() {
         if (getIsArmed()) {
-            runOnUiThread { captureInProgressBorder.visibility = View.VISIBLE }
+            runOnUiThread { 
+                captureInProgressBorder.visibility = View.VISIBLE 
+                if (role == "PRIMARY") {
+                    (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureState(true)
+                    sessionCaptureCount = 0
+                    updateCaptureCounter()
+                }
+            }
             networkService?.broadcastMessage(NetworkService.Message.StartCapture(UUID.randomUUID().toString()))
             (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.startBurstCapture(getIso(), getShutterSpeed(), getCaptureRate(), getCaptureLimit())
         }
     }
 
     override fun onStopCapture() {
-        runOnUiThread { captureInProgressBorder.visibility = View.GONE }
+        runOnUiThread { 
+            captureInProgressBorder.visibility = View.GONE 
+            if (role == "PRIMARY") {
+                (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureState(false)
+                onDisarmCapture(true)
+            }
+        }
         networkService?.broadcastMessage(NetworkService.Message.StopCapture(UUID.randomUUID().toString()))
         (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.stopBurstCapture()
     }

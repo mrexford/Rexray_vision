@@ -16,7 +16,7 @@ class CameraSessionManager(
 ) {
     private val tag = "CameraSessionManager"
     var cameraCaptureSession: CameraCaptureSession? = null
-    private lateinit var previewRequestBuilder: CaptureRequest.Builder
+    private var previewRequestBuilder: CaptureRequest.Builder? = null
 
     fun createSession(previewSurface: Surface, sessionStateCallback: CameraCaptureSession.StateCallback) {
         val cameraDevice = rexrayCameraManager.cameraDevice ?: return
@@ -43,13 +43,17 @@ class CameraSessionManager(
     }
 
     fun updatePreview(iso: Int, shutterSpeed: Long) {
+        val builder = previewRequestBuilder ?: run {
+            Log.w(tag, "updatePreview called before previewRequestBuilder was initialized. Ignoring.")
+            return
+        }
         try {
-            previewRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            previewRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-            previewRequestBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
-            previewRequestBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, shutterSpeed)
-            cameraCaptureSession?.setRepeatingRequest(previewRequestBuilder.build(), null, backgroundHandler)
+            builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            builder.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+            builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, shutterSpeed)
+            cameraCaptureSession?.setRepeatingRequest(builder.build(), null, backgroundHandler)
         } catch (e: CameraAccessException) {
             Log.e(tag, "Failed to update preview", e)
         }
@@ -117,5 +121,6 @@ class CameraSessionManager(
         }
         cameraCaptureSession?.close()
         cameraCaptureSession = null
+        previewRequestBuilder = null
     }
 }

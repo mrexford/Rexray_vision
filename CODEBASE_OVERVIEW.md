@@ -8,13 +8,12 @@ The project is a standard Android application with a single `:app` module.
 
 ## Core Components
 
-*   **`MainActivity`**: The application's entry point. Directs the user to `SetupActivity`.
-*   **`SetupActivity`**: Allows the user to select the device's role: Primary or Client. It handles the initial setup and, for Client devices, the connection to a Primary.
+*   **`SetupActivity`**: **The Primary Entry Point.** Allows the user to select the device's role: Primary or Client. It handles the initial project creation, network discovery, and connection setup.
 *   **`CaptureActivity`**: The main screen for the capture phase, responsible for managing fragments and synchronizing UI with the `NetworkService`.
 *   **`BaseCaptureFragment`**: A fragment that encapsulates core camera hardware logic, including session management and image capture. It is designed to be lifecycle-aware, releasing camera hardware when backgrounded.
 *   **`RexrayCameraManager`**: A class that wraps the Camera2 API, simplifying camera setup and configuration.
 *   **`CameraSessionManager`**: Manages the `CameraCaptureSession` and handles capture requests.
-*   **`CaptureStateHandler`**: Manages the state of image capture, including pending buffers and results.
+*   **`CaptureStateHandler`**: Manages the state of image capture, including pending buffers and results. Its buffer handling is designed to correctly handle row-stride in image data to prevent crashes.
 *   **`ImageSaver`**: A background component that saves captured RAW images to the app's internal cache as DNG files.
 *   **`FileMigrationService`**: A foreground service responsible for moving saved DNG files from internal cache to public storage.
 *   **`NetworkService`**: **The System Source of Truth.** A persistent foreground service that maintains the network server (Primary) or client connection (Client) and holds the global session state (Armed status, ISO, Shutter Speed, etc.). It persists across Activity backgrounding.

@@ -51,12 +51,15 @@ class PrimaryControlsFragment : Fragment() {
     private lateinit var histogramView: HistogramView
     private lateinit var closeAppButton: Button
     private lateinit var autoIsoIndicator: TextView
+    private lateinit var captureCounter: TextView
 
     // MIGRATION UI
     private lateinit var migrationOverlay: ConstraintLayout
     private lateinit var migrationStatusTextView: TextView
     private lateinit var migrationProgressBar: ProgressBar
     private lateinit var migrationProgressTextView: TextView
+
+    private var isCapturing = false
 
     private val shutterSpeeds = (200..1200 step 50).map { 1_000_000_000L / it }.toTypedArray()
 
@@ -95,6 +98,7 @@ class PrimaryControlsFragment : Fragment() {
         histogramView = view.findViewById(R.id.histogramView)
         closeAppButton = view.findViewById(R.id.closeAppButton)
         autoIsoIndicator = view.findViewById(R.id.autoIsoIndicator)
+        captureCounter = view.findViewById(R.id.captureCounter)
 
         migrationOverlay = view.findViewById(R.id.migrationOverlay)
         migrationStatusTextView = view.findViewById(R.id.migrationStatusTextView)
@@ -133,7 +137,13 @@ class PrimaryControlsFragment : Fragment() {
                 listener?.onArmCapture(true)
             }
         }
-        captureButton.setOnClickListener { listener?.onStartCapture() }
+        captureButton.setOnClickListener {
+            if (isCapturing) {
+                listener?.onStopCapture()
+            } else {
+                listener?.onStartCapture()
+            }
+        }
         analyzeSceneButton.setOnClickListener { listener?.onAnalyzeScene() }
         stopServerButton.setOnClickListener { listener?.onStopServer() }
         closeAppButton.setOnClickListener { listener?.onCloseApp() }
@@ -252,6 +262,16 @@ class PrimaryControlsFragment : Fragment() {
         captureButton.alpha = if(isArmed) 1.0f else 0.5f
     }
 
+    fun updateCaptureState(isCapturing: Boolean) {
+        this.isCapturing = isCapturing
+        activity?.runOnUiThread {
+            captureButton.text = if (isCapturing) "Stop" else "Capture"
+            captureCounter.visibility = if (isCapturing || captureCounter.text.toString().toIntOrNull() ?: 0 > 0) View.VISIBLE else View.INVISIBLE
+            // Disable arm button during capture
+            armButton.isEnabled = !isCapturing
+        }
+    }
+
     fun updateAutoIsoState(isAnalyzing: Boolean) {
         if (isAnalyzing) {
             analyzeSceneButton.text = "Cancel"
@@ -266,8 +286,11 @@ class PrimaryControlsFragment : Fragment() {
         }
     }
 
-    fun setCaptureCount(count: Int) {
-        // This view is no longer part of the layout
+    fun updateCaptureCount(count: Int) {
+        activity?.runOnUiThread {
+            captureCounter.text = count.toString()
+            if (count > 0) captureCounter.visibility = View.VISIBLE
+        }
     }
 
     fun setClientList(clients: List<String>) {
