@@ -14,27 +14,24 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.gson.GsonBuilder
-import com.google.gson.JsonSyntaxException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
-import java.io.IOException
-import java.net.InetSocketAddress
-import java.net.ServerSocket
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import java.net.Socket
-import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class NetworkService : Service() {
 
     private val TAG = "NetworkService"
     private val nsdManager by lazy { getSystemService(Context.NSD_SERVICE) as NsdManager }
     private val serviceType = "_rexrayvision._tcp."
     var serviceName: String? = null
-    private val numCores = Runtime.getRuntime().availableProcessors()
-    private val executor = Executors.newFixedThreadPool(numCores * 2)
+    private val executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 2)
     private val scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(1)
 
     private val gson = GsonBuilder()
@@ -44,9 +41,41 @@ class NetworkService : Service() {
     private val binder = NetworkBinder()
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
-    private var serverSocket: ServerSocket? = null
-    private var clientSocket: Socket? = null
+    
+    // Decomposed Helpers
+    private var server: RexrayServer? = null
+    private var client: RexrayClient? = null
+
     private var cameraName: String = ""
+
+    // Session State Master Variables
+    enum class ServiceRole { IDLE, PRIMARY, CLIENT }
+    private val _serviceRole = MutableStateFlow(ServiceRole.IDLE)
+    val serviceRole = _serviceRole.asStateFlow()
+
+    private val _isArmed = MutableStateFlow(false)
+    val isArmed = _isArmed.asStateFlow()
+
+    private val _iso = MutableStateFlow(400)
+    val iso = _iso.asStateFlow()
+
+    private val _shutterSpeed = MutableStateFlow(3333333L)
+    val shutterSpeed = _shutterSpeed.asStateFlow()
+
+    private val _captureRate = MutableStateFlow(15)
+    val captureRate = _captureRate.asStateFlow()
+
+    private val _captureLimit = MutableStateFlow(30)
+    val captureLimit = _captureLimit.asStateFlow()
+
+    private val _projectName = MutableStateFlow("DefaultProject")
+    val projectName = _projectName.asStateFlow()
+
+    private val _isReady = MutableStateFlow(false)
+    val isReady = _isReady.asStateFlow()
+
+    // Command Queue for early calls
+    private val commandQueue = mutableListOf<() -> Unit>()
 
     var currentImageCount: Int = 0
     var isClientArmed: Boolean = false
@@ -61,14 +90,19 @@ class NetworkService : Service() {
     private val _discoveredServices = MutableStateFlow<List<NsdServiceInfo>>(emptyList())
     val discoveredServices = _discoveredServices.asStateFlow()
 
-    private val _connectedClients = MutableStateFlow<Map<Socket, ClientStatus>>(emptyMap())
-    val connectedClients = _connectedClients.asStateFlow()
-
-    private val _incomingMessages = MutableStateFlow<Pair<Socket, Message>?>(null)
+    // Combined flows for Activity observation - Unified with helpers
+    val connectedClients = _isReady.flatMapLatest { ready ->
+        if (ready) server?.connectedClients ?: flowOf(emptyMap())
+        else flowOf(emptyMap())
+    }
+    
+    private val _incomingMessages = MutableStateFlow<Pair<Socket?, Message>?>(null)
     val incomingMessages = _incomingMessages.asStateFlow()
 
-    private val _isConnectedToPrimary = MutableStateFlow(false)
-    val isConnectedToPrimary = _isConnectedToPrimary.asStateFlow()
+    val isConnectedToPrimary = _isReady.flatMapLatest { ready ->
+        if (ready) client?.isConnected ?: flowOf(false)
+        else flowOf(false)
+    }
 
     data class ClientStatus(
         val socket: Socket,
@@ -100,20 +134,68 @@ class NetworkService : Service() {
         return binder
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    override fun onCreate() {
+        super.onCreate()
+        Log.d(TAG, "onCreate: Bootstrapping service asynchronously.")
+        
         createNotificationChannel()
-        val notification = createNotification()
-        startForeground(NOTIFICATION_ID, notification)
+        
+        executor.execute {
+            try {
+                val s = RexrayServer(executor, gson) { socket, message -> 
+                    _incomingMessages.value = socket to message
+                }
+                val c = RexrayClient(executor, gson, { message ->
+                    handlePrimaryMessage(message)
+                }, {
+                    _serviceRole.value = ServiceRole.IDLE
+                })
+                
+                server = s
+                client = c
+                
+                _isReady.value = true
+                Log.d(TAG, "Service bootstrap complete. Executing queued commands: ${commandQueue.size}")
+                
+                synchronized(commandQueue) {
+                    commandQueue.forEach { it.invoke() }
+                    commandQueue.clear()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to bootstrap service", e)
+            }
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForeground(NOTIFICATION_ID, createNotification())
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        stopServer()
+        server?.stop()
+        client?.disconnect()
         stopDiscovery()
         unregisterService()
         executor.shutdown()
         scheduler.shutdown()
+    }
+
+    private fun handlePrimaryMessage(message: Message) {
+        when (message) {
+            is Message.SetParams -> {
+                _iso.value = message.iso
+                _shutterSpeed.value = message.shutterSpeed
+                _captureRate.value = message.captureRate
+                _captureLimit.value = message.captureCount
+                _projectName.value = message.projectName
+            }
+            is Message.ArmCapture -> _isArmed.value = true
+            is Message.DisarmCapture -> _isArmed.value = false
+            else -> {}
+        }
+        _incomingMessages.value = null to message
     }
 
     fun setCameraName(name: String) {
@@ -121,64 +203,77 @@ class NetworkService : Service() {
         broadcastMessage(Message.UpdateCameraName(name))
     }
 
-    fun updateClientCameraName(socket: Socket, name: String) {
-        _connectedClients.update { clients ->
-            val updatedClients = clients.toMutableMap()
-            val clientStatus = updatedClients[socket]
-            if (clientStatus != null) {
-                updatedClients[socket] = clientStatus.copy(cameraName = name)
-            }
-            updatedClients
-        }
-    }
+    // State Update Methods
+    fun updateProjectName(name: String) { _projectName.value = name }
+    fun updateIso(value: Int) { _iso.value = value }
+    fun updateShutterSpeed(value: Long) { _shutterSpeed.value = value }
+    fun updateCaptureRate(value: Int) { _captureRate.value = value }
+    fun updateCaptureLimit(value: Int) { _captureLimit.value = value }
+    fun updateArmingStatus(armed: Boolean) { _isArmed.value = armed }
 
     fun registerService(port: Int, name: String) {
-        val listeningPort = startServer(port)
-        if (listeningPort == -1) {
-            Log.e(TAG, "Failed to start server, aborting service registration")
+        if (!_isReady.value) {
+            Log.d(TAG, "Queuing registerService for $name")
+            synchronized(commandQueue) {
+                commandQueue.add { registerService(port, name) }
+            }
             return
         }
+        if (_serviceRole.value == ServiceRole.PRIMARY) return
 
-        val serviceInfo = NsdServiceInfo().apply {
-            this.serviceName = name
-            this.serviceType = this@NetworkService.serviceType
-            this.port = listeningPort
-        }
+        executor.execute {
+            val listeningPort = server?.start(port) ?: -1
+            if (listeningPort == -1) return@execute
 
-        registrationListener = object : NsdManager.RegistrationListener {
-            override fun onServiceRegistered(nsdServiceInfo: NsdServiceInfo) {
-                this@NetworkService.serviceName = nsdServiceInfo.serviceName
-                Log.d(TAG, "Service registered: ${this@NetworkService.serviceName} on port $listeningPort")
+            _serviceRole.value = ServiceRole.PRIMARY
+            _projectName.value = name
+
+            val serviceInfo = NsdServiceInfo().apply {
+                this.serviceName = name
+                this.serviceType = this@NetworkService.serviceType
+                this.port = listeningPort
             }
-            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) { Log.e(TAG, "Service registration failed: $errorCode") }
-            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) { Log.d(TAG, "Service unregistered: ${serviceInfo.serviceName}") }
-            override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) { Log.e(TAG, "Service unregistration failed: $errorCode") }
-        }
 
-        nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
+            registrationListener = object : NsdManager.RegistrationListener {
+                override fun onServiceRegistered(nsdServiceInfo: NsdServiceInfo) {
+                    this@NetworkService.serviceName = nsdServiceInfo.serviceName
+                    Log.d(TAG, "Service registered: ${this@NetworkService.serviceName}")
+                }
+                override fun onRegistrationFailed(s: NsdServiceInfo, e: Int) {}
+                override fun onServiceUnregistered(s: NsdServiceInfo) {}
+                override fun onUnregistrationFailed(s: NsdServiceInfo, e: Int) {}
+            }
+
+            nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
+        }
     }
 
     fun unregisterService() {
         registrationListener?.let { nsdManager.unregisterService(it) }
         registrationListener = null
-        stopServer()
+        server?.stop()
+        _serviceRole.value = ServiceRole.IDLE
     }
 
     fun discoverServices() {
         _discoveredServices.value = emptyList()
         discoveryListener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(regType: String) { Log.d(TAG, "Service discovery started") }
+            override fun onDiscoveryStarted(regType: String) {}
             override fun onServiceFound(service: NsdServiceInfo) {
                 if (!_discoveredServices.value.any { it.serviceName == service.serviceName }) {
-                     _discoveredServices.update { it + service }
+                     val list = _discoveredServices.value.toMutableList()
+                     list.add(service)
+                     _discoveredServices.value = list
                 }
             }
             override fun onServiceLost(service: NsdServiceInfo) {
-                _discoveredServices.update { it.filter { s -> s.serviceName != service.serviceName } }
+                val list = _discoveredServices.value.toMutableList()
+                list.removeAll { it.serviceName == service.serviceName }
+                _discoveredServices.value = list
             }
-            override fun onDiscoveryStopped(serviceType: String) { Log.d(TAG, "Service discovery stopped") }
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) { Log.e(TAG, "Discovery failed: Error code: $errorCode") }
-            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) { Log.e(TAG, "Stop Discovery failed: Error code: $errorCode") }
+            override fun onDiscoveryStopped(s: String) {}
+            override fun onStartDiscoveryFailed(s: String, e: Int) {}
+            override fun onStopDiscoveryFailed(s: String, e: Int) {}
         }
         nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
     }
@@ -189,294 +284,51 @@ class NetworkService : Service() {
     }
 
     fun resolveService(serviceInfo: NsdServiceInfo) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            nsdManager.resolveService(serviceInfo, executor, object : NsdManager.ResolveListener {
-                override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) { Log.e(TAG, "Resolve failed: $errorCode") }
-                override fun onServiceResolved(resolvedInfo: NsdServiceInfo) {
-                    connectToPrimary(resolvedInfo)
-                }
-            })
-        } else {
-            @Suppress("DEPRECATION")
-            nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
-                override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) { Log.e(TAG, "Resolve failed: $errorCode") }
-                override fun onServiceResolved(resolvedInfo: NsdServiceInfo) {
-                    connectToPrimary(resolvedInfo)
-                }
-            })
+        nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
+            override fun onResolveFailed(s: NsdServiceInfo, e: Int) {}
+            override fun onServiceResolved(resolvedInfo: NsdServiceInfo) {
+                connectToPrimary(resolvedInfo)
+            }
+        })
+    }
+
+    fun connectToPrimary(serviceInfo: NsdServiceInfo) {
+        if (!_isReady.value) {
+            Log.d(TAG, "Queuing connectToPrimary for ${serviceInfo.serviceName}")
+            synchronized(commandQueue) {
+                commandQueue.add { connectToPrimary(serviceInfo) }
+            }
+            return
         }
+        if (_serviceRole.value == ServiceRole.CLIENT) return
+        
+        client?.connect(serviceInfo.host.hostAddress!!, serviceInfo.port)
+        _serviceRole.value = ServiceRole.CLIENT
     }
 
     fun disconnectFromPrimary() {
-        Log.i(TAG, "Disconnecting from primary")
         stopSendingStatusUpdates()
-        sendMessageToPrimary(Message.LeaveGroup)
-        try {
-            clientSocket?.close()
-            Log.i(TAG, "Primary client socket closed")
-        } catch (e: IOException) {
-            Log.e(TAG, "Error closing client socket", e)
-        }
-        _isConnectedToPrimary.value = false
-    }
-
-    private fun startServer(port: Int): Int {
-        val localServerSocket: ServerSocket
-        try {
-            localServerSocket = ServerSocket(port)
-            serverSocket = localServerSocket
-            Log.i(TAG, "Server started on port ${localServerSocket.localPort}")
-        } catch (e: IOException) {
-            Log.e(TAG, "Error starting server", e)
-            return -1
-        }
-
-        executor.execute {
-            while (!localServerSocket.isClosed) {
-                try {
-                    val client = localServerSocket.accept()
-                    Log.i(TAG, "Client connected: ${client.inetAddress.hostAddress}")
-                    handleClient(client)
-                } catch (e: IOException) {
-                    if (localServerSocket.isClosed) {
-                        Log.i(TAG, "Server socket closed, stopping accept loop.")
-                        break
-                    }
-                    Log.e(TAG, "Error accepting client connection", e)
-                }
-            }
-        }
-        return localServerSocket.localPort
-    }
-
-    private fun stopServer() {
-        try {
-            serverSocket?.close()
-            _connectedClients.value.values.forEach { it.socket.close() }
-            _connectedClients.value = emptyMap()
-            Log.i(TAG, "Server stopped")
-        } catch (e: IOException) {
-            Log.e(TAG, "Error closing server socket", e)
-        }
-    }
-
-    private fun connectToPrimary(serviceInfo: NsdServiceInfo) {
-        executor.execute {
-            try {
-                Log.i(TAG, "Connecting to primary at ${serviceInfo.host}:${serviceInfo.port}")
-                clientSocket = Socket()
-                clientSocket?.connect(InetSocketAddress(serviceInfo.host, serviceInfo.port), 5000)
-                Log.i(TAG, "Connected to primary. Sending JoinGroup message.")
-                sendMessageToPrimary(Message.JoinGroup(serviceInfo.serviceName))
-                _isConnectedToPrimary.value = true
-                listenForServerMessages(clientSocket!!)
-                startSendingStatusUpdates()
-            } catch (e: IOException) {
-                Log.e(TAG, "Error connecting to primary", e)
-                _isConnectedToPrimary.value = false
-            } catch (e: SocketTimeoutException) {
-                Log.e(TAG, "Connection to primary timed out", e)
-                _isConnectedToPrimary.value = false
-            }
-        }
-    }
-
-    private fun listenForServerMessages(socket: Socket) {
-        executor.execute {
-            val serverAddress = socket.inetAddress.hostAddress
-            Log.d(TAG, "[$serverAddress] Starting to listen for server messages.")
-
-            try {
-                val reader = socket.getInputStream().bufferedReader()
-                while (socket.isConnected) {
-                    var line: String? = null
-                    try {
-                        line = reader.readLine()
-                        if (line == null) {
-                            Log.d(TAG, "[$serverAddress] Server disconnected (readLine returned null).")
-                            break
-                        }
-
-                        Log.d(TAG, "[$serverAddress] Received line: $line")
-                        val message = gson.fromJson(line, Message::class.java)
-                        Log.i(TAG, "[$serverAddress] Parsed message: $message")
-
-                        if (message is Message.ConnectionRejected) {
-                            Log.w(TAG, "[$serverAddress] Connection rejected by server.")
-                            stopDiscovery()
-                            discoverServices()
-                            break
-                        }
-
-                        _incomingMessages.value = Pair(socket, message)
-
-                    } catch (e: JsonSyntaxException) {
-                        Log.e(TAG, "[$serverAddress] Malformed JSON received: $line", e)
-                    } catch (e: IOException) {
-                        Log.e(TAG, "[$serverAddress] IO Error while reading from socket", e)
-                        break
-                    }
-                }
-            } catch (e: IOException) {
-                Log.e(TAG, "[$serverAddress] Error getting input stream", e)
-            } finally {
-                Log.d(TAG, "[$serverAddress] Cleaning up server connection.")
-                _isConnectedToPrimary.value = false
-                try {
-                    socket.close()
-                    Log.i(TAG, "[$serverAddress] Final socket closure successful.")
-                } catch (e: IOException) {
-                    Log.e(TAG, "[$serverAddress] Error closing server socket in finally block", e)
-                }
-            }
-        }
-    }
-
-    private fun handleClient(socket: Socket) {
-        executor.execute {
-            val clientAddress = socket.inetAddress.hostAddress
-            Log.d(TAG, "[$clientAddress] Starting to handle client.")
-
-            try {
-                val reader = socket.getInputStream().bufferedReader()
-                while (socket.isConnected) {
-                    var line: String? = null
-                    try {
-                        line = reader.readLine()
-                        if (line == null) {
-                            Log.d(TAG, "[$clientAddress] Client disconnected (readLine returned null).")
-                            break
-                        }
-
-                        Log.d(TAG, "[$clientAddress] Received line: $line")
-                        val message = gson.fromJson(line, Message::class.java)
-                        Log.i(TAG, "[$clientAddress] Parsed message: $message")
-
-                        when (message) {
-                            is Message.JoinGroup -> {
-                                if (this.serviceName != message.projectName) {
-                                    Log.w(TAG, "[$clientAddress] Client attempted to join with stale project name. Server: ${this.serviceName}, Client: ${message.projectName}")
-                                    sendMessage(socket, Message.ConnectionRejected)
-                                    socket.close()
-                                    break
-                                }
-                                Log.i(TAG, "[$clientAddress] Client joined group.")
-                                val status = ClientStatus(socket, 0, false)
-                                _connectedClients.update { it + (socket to status) }
-                            }
-                            is Message.LeaveGroup -> {
-                                Log.i(TAG, "[$clientAddress] Client is leaving group.")
-                                _connectedClients.update { it - socket }
-                                socket.close()
-                                Log.i(TAG, "[$clientAddress] Socket closed for leaving client.")
-                                break
-                            }
-                            is Message.StatusUpdate -> {
-                                _connectedClients.update { clients ->
-                                    val mutableClients = clients.toMutableMap()
-                                    val clientStatus = mutableClients[socket]
-                                    if (clientStatus != null) {
-                                        mutableClients[socket] = clientStatus.copy(
-                                            imageCount = message.imageCount,
-                                            isArmed = message.isArmed,
-                                            cameraName = message.cameraName
-                                        )
-                                    }
-                                    mutableClients
-                                }
-                            }
-                            is Message.CommandAck -> {
-                                _connectedClients.update { clients ->
-                                    val mutableClients = clients.toMutableMap()
-                                    val clientStatus = mutableClients[socket]
-                                    if (clientStatus != null) {
-                                        mutableClients[socket] = clientStatus.copy(lastCommandAck = true)
-                                    }
-                                    mutableClients
-                                }
-                            }
-                            is Message.UpdateCameraName -> {
-                                _connectedClients.update { clients ->
-                                    val mutableClients = clients.toMutableMap()
-                                    val clientStatus = mutableClients[socket]
-                                    if (clientStatus != null) {
-                                        mutableClients[socket] = clientStatus.copy(cameraName = message.name)
-                                    }
-                                    mutableClients
-                                }
-                            }
-                            else -> {
-                                Log.e(TAG, "[$clientAddress] Received unexpected message type: $message")
-                            }
-                        }
-                    } catch (e: JsonSyntaxException) {
-                        Log.e(TAG, "[$clientAddress] Malformed JSON received: $line", e)
-                    } catch (e: IOException) {
-                        Log.e(TAG, "[$clientAddress] IO Error while reading from socket", e)
-                        break 
-                    }
-                }
-            } catch (e: IOException) {
-                Log.e(TAG, "[$clientAddress] Error getting input stream", e)
-            } finally {
-                Log.d(TAG, "[$clientAddress] Cleaning up client connection.")
-                _connectedClients.update { it - socket }
-                try {
-                    socket.close()
-                    Log.i(TAG, "[$clientAddress] Final socket closure successful.")
-                } catch (e: IOException) {
-                    Log.e(TAG, "[$clientAddress] Error closing client socket in finally block", e)
-                }
-            }
-        }
-    }
-
-    fun sendMessage(socket: Socket, message: Message) {
-        val clientAddress = socket.inetAddress.hostAddress
-        executor.execute {
-            try {
-                val jsonMessage = gson.toJson(message)
-                Log.d(TAG, "[$clientAddress] Sending message: $jsonMessage")
-                val writer = socket.getOutputStream().bufferedWriter()
-                writer.write(jsonMessage)
-                writer.newLine()
-                writer.flush()
-            } catch (e: IOException) {
-                Log.e(TAG, "[$clientAddress] Error sending message", e)
-            }
-        }
+        client?.send(Message.LeaveGroup)
+        client?.disconnect()
+        _serviceRole.value = ServiceRole.IDLE
     }
 
     fun broadcastMessage(message: Message) {
-        Log.d(TAG, "Broadcasting message: $message")
-        _connectedClients.value.keys.forEach { socket ->
-            _connectedClients.update { clients ->
-                val mutableClients = clients.toMutableMap()
-                val clientStatus = mutableClients[socket]
-                if (clientStatus != null) {
-                    mutableClients[socket] = clientStatus.copy(lastCommandAck = false)
-                }
-                mutableClients
-            }
+        if (_serviceRole.value == ServiceRole.PRIMARY) {
+            server?.broadcast(message)
         }
-        _connectedClients.value.values.forEach { sendMessage(it.socket, message) }
     }
 
     fun sendMessageToPrimary(message: Message) {
-        clientSocket?.let { 
-            Log.d(TAG, "Sending message to primary: $message")
-            sendMessage(it, message) 
+        if (_serviceRole.value == ServiceRole.CLIENT) {
+            client?.send(message)
         }
     }
 
     private var statusUpdateJob: java.util.concurrent.ScheduledFuture<*>? = null
 
     private fun startSendingStatusUpdates() {
-        if (statusUpdateJob?.isDone == false) {
-            Log.d(TAG, "Status update job already running.")
-            return
-        }
-        updateStatusUpdateSpeed() // Initial setup
+        updateStatusUpdateSpeed()
     }
 
     private fun stopSendingStatusUpdates() {
@@ -487,7 +339,6 @@ class NetworkService : Service() {
         statusUpdateJob?.cancel(true)
         val period = if (isClientArmed) 250L else 2000L
         statusUpdateJob = scheduler.scheduleWithFixedDelay({ sendStatusUpdate() }, 0, period, TimeUnit.MILLISECONDS)
-        Log.d(TAG, "Status update speed changed to $period ms")
     }
 
     fun sendStatusUpdate() {

@@ -10,19 +10,21 @@ The project is a standard Android application with a single `:app` module.
 
 *   **`MainActivity`**: The application's entry point. Directs the user to `SetupActivity`.
 *   **`SetupActivity`**: Allows the user to select the device's role: Primary or Client. It handles the initial setup and, for Client devices, the connection to a Primary.
-*   **`CaptureActivity`**: The main screen for the capture phase, responsible for managing the camera preview, user interface, and capture lifecycle.
-*   **`BaseCaptureFragment`**: A headless fragment that encapsulates the core camera logic, including session management, image capture, and exposure analysis. The auto-exposure logic uses a passive analysis of the preview stream's histogram data to continuously adjust the ISO.
+*   **`CaptureActivity`**: The main screen for the capture phase, responsible for managing fragments and synchronizing UI with the `NetworkService`.
+*   **`BaseCaptureFragment`**: A fragment that encapsulates core camera hardware logic, including session management and image capture. It is designed to be lifecycle-aware, releasing camera hardware when backgrounded.
 *   **`RexrayCameraManager`**: A class that wraps the Camera2 API, simplifying camera setup and configuration.
 *   **`CameraSessionManager`**: Manages the `CameraCaptureSession` and handles capture requests.
-*   **`CaptureStateHandler`**: Manages the state of image capture, including pending buffers and results. Its buffer handling is designed to correctly handle row-stride in image data to prevent crashes.
-*   **`ImageSaver`**: A background component that saves captured RAW images to the app's internal cache as DNG files using `DngCreator`. It acts as the consumer in a producer-consumer pattern and tracks active disk write tasks via `StateFlow`.
-*   **`FileMigrationService`**: A foreground service responsible for sequentially moving saved DNG files from the app's internal cache to public storage (MediaStore) once capture and disk-writing are complete. It provides progress updates to the UI.
-*   **`ExposureAnalysisStrategy`**: An interface for different exposure analysis algorithms. The current implementation is `HistogramEttrAnalysisStrategy`, which uses a histogram-based approach to determine the correct exposure.
-*   **`ByteBufferPool`**: A utility class for pooling and reusing `ByteBuffer`s to reduce memory allocation and garbage collection overhead during high-speed capture.
-*   **`NetworkService`**: A foreground service for network discovery and communication between primary and client devices.
+*   **`CaptureStateHandler`**: Manages the state of image capture, including pending buffers and results.
+*   **`ImageSaver`**: A background component that saves captured RAW images to the app's internal cache as DNG files.
+*   **`FileMigrationService`**: A foreground service responsible for moving saved DNG files from internal cache to public storage.
+*   **`NetworkService`**: **The System Source of Truth.** A persistent foreground service that maintains the network server (Primary) or client connection (Client) and holds the global session state (Armed status, ISO, Shutter Speed, etc.). It persists across Activity backgrounding.
+    *   **`RexrayServer`**: (Internal to Service) Handles the TCP server socket, client connections, and broadcasting.
+    *   **`RexrayClient`**: (Internal to Service) Handles the client socket and incoming message listening.
+*   **`ExposureAnalysisStrategy`**: An interface for different exposure analysis algorithms.
+*   **`ByteBufferPool`**: A utility class for pooling and reusing `ByteBuffer`s.
 
 ## Architectural Patterns
 
-*   **Producer-Consumer**: The `BaseCaptureFragment` acts as the producer of image data, and the `ImageSaver` is the consumer.
-*   **StateFlow**: Used to propagate state and asynchronous updates from backend services to the UI.
-*   **Dependency Injection**: While not using a formal framework, dependencies are manually provided to classes.
+*   **Service-Centric State**: The `NetworkService` acts as the master authority for the capture session. Activities and Fragments observe `StateFlow`s from the service to remain synchronized.
+*   **Producer-Consumer**: The `BaseCaptureFragment` produces image data; `ImageSaver` consumes it.
+*   **Lifecycle-Aware Hardware**: Hardware resources (Camera) are released during backgrounding to ensure system stability, while network resources (Sockets) are maintained by the foreground service.

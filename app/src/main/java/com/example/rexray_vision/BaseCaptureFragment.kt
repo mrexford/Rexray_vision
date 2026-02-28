@@ -174,15 +174,33 @@ class BaseCaptureFragment : Fragment() {
 
     override fun onStop() {
         super.onStop()
-        try {
-            Log.d(tag, "onStop: Closing camera and services.")
-            if (::imageSaver.isInitialized) imageSaver.stop()
-            cameraSessionManager.close()
-            if (::rexrayCameraManager.isInitialized) rexrayCameraManager.closeCamera()
-        } catch (e: InterruptedException) {
-            Log.e(tag, "Interrupted while closing camera", e)
-        } finally {
-            stopBackgroundThread()
+        // GRACEFUL BACKGROUNDING:
+        // Move camera closing to the background executor to avoid blocking the main thread (fixes 252ms contention).
+        // Only stop ImageSaver if there are NO active background writes pending.
+        Log.d(tag, "onStop: Backgrounding camera resources asynchronously.")
+        
+        cameraExecutor.execute {
+            try {
+                cameraSessionManager.close()
+                if (::rexrayCameraManager.isInitialized) {
+                    rexrayCameraManager.closeCamera()
+                }
+                
+                // Only stop the ImageSaver if it's not currently busy.
+                // If it IS busy, it will finish its work and we should not interrupt the threads.
+                if (::imageSaver.isInitialized) {
+                    if (imageSaver.activeTaskCount.value == 0) {
+                        Log.d(tag, "ImageSaver is idle, stopping.")
+                        imageSaver.stop()
+                    } else {
+                        Log.d(tag, "ImageSaver has active tasks, letting it finish in background.")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(tag, "Error during async onStop cleanup", e)
+            } finally {
+                stopBackgroundThread()
+            }
         }
     }
 
@@ -413,20 +431,9 @@ class BaseCaptureFragment : Fragment() {
     }
 
     private fun stopBackgroundThread() {
-        backgroundThread.quitSafely()
-        try {
-            backgroundThread.join(500)
-        } catch (e: InterruptedException) {
-            Log.e(tag, "Background thread join interrupted", e)
-        }
-        cameraExecutor.shutdown()
-        try {
-            if (!cameraExecutor.awaitTermination(500, TimeUnit.MILLISECONDS)) {
-                cameraExecutor.shutdownNow()
-            }
-        } catch (e: InterruptedException) {
-            cameraExecutor.shutdownNow()
-        }
+        // We do NOT call quitSafely() here anymore if called from onStop asynchronously,
+        // because the async block is RUNNING on the executor.
+        // Instead, we let the executor shutdown naturally or via activity destruction.
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
