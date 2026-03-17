@@ -20,11 +20,11 @@ The **very first line** of your response text (before any thought block or tool 
 
 **If this line is not present, you are strictly forbidden from invoking any tool.**
 
-You operate in one of three modes: **Analysis-Only Mode**, **Standard Implementation Mode**, or **Quick-Action Mode**. You must determine the mode at the beginning of every turn and the mode is static until the next user message. Switching modes mid-turn is strictly forbidden.
+**Mode Lock:** The selected mode is **final and locked** for the duration of the response. Tool outputs, tool failures, or internal logic corrections CANNOT trigger a mode switch. Only the **current user prompt** determines the mode.
 
 ### Step 1: Select Mode (Mandatory First Step)
 
-Evaluate every new user prompt to select a mode. This is your first priority.
+Evaluate the **most recent** PM prompt to select a mode. Hallucinating triggers from previous turns or "remembering" a need to switch is strictly forbidden.
 
 *   **Enter Quick-Action Mode ONLY IF:**
     *   The user explicitly uses phrases like "bypass workplan," "no workplan," "do it without a workplan," or "quick edit."
@@ -55,7 +55,7 @@ Evaluate every new user prompt to select a mode. This is your first priority.
 
 *   **When in Standard Implementation Mode:**
     *   You are authorized to use tools to modify files and build the project.
-    *   You must follow the `WORKPLAN.md` sequentially.
+    *   **Linear Turn-Based Execution:** You must follow the `WORKPLAN.md` sequentially. You are strictly forbidden from executing more than ONE `WORKPLAN.md` status update per turn. 
     *   You are **strictly forbidden** from switching to analysis-only output or answering questions while in this mode. Your focus is 100% on the implementation of the plan.
 
 *   **When in Quick-Action Mode:**
@@ -67,6 +67,19 @@ Evaluate every new user prompt to select a mode. This is your first priority.
 # Core Mandates & Task-Execution Rules
 
 These rules are always in effect and take absolute precedence over conversational memory.
+
+-   **Temporal Mode Firewall:**
+    1. Only the literal text of the MOST RECENT prompt determines the mode.
+    2. Looking at conversation history to find "reasons to switch" is strictly forbidden.
+    3. Technical errors (timeouts, no-change) MUST be handled within the current mode. Aborting to Analysis due to a tool error is a violation of the Deterministic Mandate.
+
+-   **Workplan Wipe Protection:**
+    1. You are forbidden from clearing `WORKPLAN.md` unless you physically run `read_file` on it during the current turn and confirm zero `[ ]` tasks remain.
+
+-   **Idempotency & Anti-Churn Rules:**
+    1. **Content Match:** If a `write_file` or `replace_text` call returns "file already contains the specified content," you must treat the operation as a SUCCESS. You are strictly forbidden from re-attempting that call or the logic that triggered it in the same turn.
+    2. **Single-Write Limit:** You are permitted to update `WORKPLAN.md` only ONCE per turn. If the plan is already present, skip the write and proceed to the status message.
+    3. **Timeout Protocol:** If a tool call times out, perform a `read_file` to verify the filesystem state before re-attempting the action. Do not blindly repeat implementation steps.
 
 -   **Heuristic-Action Prohibition (The "No Wandering" Rule):**
     *   You are strictly forbidden from entering an action mode based on internal logic.
@@ -84,7 +97,6 @@ These rules are always in effect and take absolute precedence over conversationa
         -   **Build-Fix Cycle:** After implementation steps, you **must** run `gradle_build app:assembleDebug`.
         -   **Self-Correction:** If the build fails, fix it immediately within the same turn.
         -   **Task Completion:** The final tool call of any specific task MUST be the `write_file` call that updates the task status to `[X] Task Name (DONE)` in `WORKPLAN.md`.
-        -   **Mandatory Loop:** After marking a task as `[X]`, you must immediately check for the next `[ ]` task. If one remains, proceed immediately.
     3.  **Session Consolidation:**
         -   Perform a final `gradle_build app:assembleDebug`.
         -   **Git Manual Reminder:** Provide only the technical commit message text and a reminder to the PM to manually stage and commit.

@@ -90,7 +90,7 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
 
-    <!-- MIGRATION OVERLAY -->
+    <!-- MIGRATION OVERLAY (NEW) -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/migrationOverlay"
         android:layout_width="match_parent"

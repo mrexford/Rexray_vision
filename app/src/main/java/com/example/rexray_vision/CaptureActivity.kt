@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.SharedPreferences
+import android.hardware.camera2.CameraManager
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
@@ -38,17 +39,19 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     private lateinit var sharedPreferences: SharedPreferences
     private var networkStateJob: Job? = null
     private var migrationStateJob: Job? = null
+    private var migrationTriggerJob: Job? = null
 
     private lateinit var currentProjectName: String
     private lateinit var cameraName: String
     
-    // Removed local state variables. NetworkService is now the source of truth.
     private var dngWriterThreads = 4
     private var sessionCaptureCount = 0
 
     private lateinit var loadingIndicator: FrameLayout
     private lateinit var loadingStatus: TextView
     private lateinit var captureInProgressBorder: View
+
+    private val cameraManager by lazy { getSystemService(Context.CAMERA_SERVICE) as CameraManager }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -58,7 +61,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             isBound = true
             
             if (role == "PRIMARY") {
-                // Persistent Server Check: Don't restart if already running
                 if (ns.serviceRole.value == NetworkService.ServiceRole.IDLE) {
                     ns.registerService(0, "$currentProjectName-$cameraName")
                 } else {
@@ -153,7 +155,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         networkStateJob = lifecycleScope.launch {
             val ns = networkService ?: return@launch
             
-            // Observe connection health
             launch {
                 ns.isConnectedToPrimary.collect { isConnected ->
                     if (role == "CLIENT" && !isConnected) {
@@ -166,10 +167,27 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
                 }
             }
 
-            // Sync UI with Master Service State
             launch {
-                combine(ns.iso, ns.shutterSpeed, ns.captureRate, ns.captureLimit, ns.projectName) { i, s, r, l, p ->
-                    MasterState(i, s, r, l, p)
+                combine(
+                    ns.iso,
+                    ns.shutterSpeed,
+                    ns.captureRate,
+                    ns.captureLimit,
+                    ns.projectName,
+                    ns.captureMode,
+                    ns.isFlashEnabled,
+                    ns.flashIntensity
+                ) { args ->
+                    MasterState(
+                        args[0] as Int,
+                        args[1] as Long,
+                        args[2] as Int,
+                        args[3] as Int,
+                        args[4] as String,
+                        args[5] as NetworkService.CaptureMode,
+                        args[6] as Boolean,
+                        args[7] as Int
+                    )
                 }.collectLatest { state ->
                     currentProjectName = state.projectName
                     updatePreview()
@@ -177,7 +195,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
                 }
             }
 
-            // Sync Armed Status
             launch {
                 ns.isArmed.collect { armed ->
                     if (role == "PRIMARY") {
@@ -186,7 +203,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
                 }
             }
 
-            // Sync Client List
             launch {
                 ns.connectedClients.collect { clients ->
                     if (role == "PRIMARY") {
@@ -196,12 +212,9 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
                 }
             }
 
-            // Handle Incoming Commands (Event-based stream)
             launch {
                 ns.incomingMessages.collect { messagePair ->
-                    val (socket, message) = messagePair
-                    Log.d(tag, "Network Message Received: $message from ${socket?.inetAddress?.hostAddress ?: "Self/Server"}")
-                    
+                    val (_, message) = messagePair
                     when (message) {
                         is NetworkService.Message.ArmCapture -> onArmCapture(false)
                         is NetworkService.Message.DisarmCapture -> onDisarmCapture(false)
@@ -210,11 +223,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
                         is NetworkService.Message.SyncTrigger -> {
                             if (role == "PRIMARY") broadcastSettings()
                         }
-                        is NetworkService.Message.LeaveGroup -> {
-                            if (role == "PRIMARY") {
-                                Log.i(tag, "Client requested to leave group.")
-                            }
-                        }
                         else -> {}
                     }
                 }
@@ -222,7 +230,7 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         }
     }
 
-    data class MasterState(val iso: Int, val shutterSpeed: Long, val captureRate: Int, val captureLimit: Int, val projectName: String)
+    data class MasterState(val iso: Int, val shutterSpeed: Long, val captureRate: Int, val captureLimit: Int, val projectName: String, val captureMode: NetworkService.CaptureMode, val isFlashEnabled: Boolean, val flashIntensity: Int)
 
     private fun observeMigrationState() {
         migrationStateJob?.cancel()
@@ -266,7 +274,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     }
 
     override fun onCameraReady() {
-        Log.d(tag, "onCameraReady: Applying Master Service settings to preview")
         updatePreview()
         runOnUiThread { 
             val primaryFrag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment
@@ -276,15 +283,19 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             
             val baseFrag = supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment
             baseFrag?.let { bf ->
-                lifecycleScope.launch {
+                migrationTriggerJob?.cancel()
+                migrationTriggerJob = lifecycleScope.launch {
                     bf.getImageSaver().activeTaskCount.collect { count ->
                         if (bf.isAwaitingMigration()) {
+                            Log.d(tag, "IO_TRACING: Pending Disk Tasks: $count")
                             primaryFrag?.updateDiskWriteProgress(count)
                             clientFrag?.updateDiskWriteProgress(count)
-                        }
-                        if (count == 0 && bf.isAwaitingMigration()) {
-                            bf.markMigrationStarted()
-                            startMigrationService()
+                            
+                            if (count == 0) {
+                                Log.i(tag, "IO_TRACING: ImageSaver idle. Handing off to FileMigrationService.")
+                                bf.markMigrationStarted()
+                                startMigrationService()
+                            }
                         }
                     }
                 }
@@ -352,6 +363,18 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         networkService?.updateProjectName(pName)
         sessionCaptureCount = 0
         updateCaptureCounter()
+        
+        if (force) {
+            clearCache()
+        }
+    }
+
+    private fun clearCache() {
+        val cacheDir = File(filesDir, "dng_cache")
+        if (cacheDir.exists()) {
+            cacheDir.listFiles()?.forEach { it.delete() }
+            Log.d(tag, "Cache cleared for new project.")
+        }
     }
 
     private fun generateCameraName(force: Boolean) {
@@ -371,6 +394,9 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     fun getShutterSpeed(): Long = networkService?.shutterSpeed?.value ?: 3333333L
     fun getCaptureRate(): Int = networkService?.captureRate?.value ?: 15
     fun getCaptureLimit(): Int = networkService?.captureLimit?.value ?: 30
+    fun getCaptureMode(): NetworkService.CaptureMode = networkService?.captureMode?.value ?: NetworkService.CaptureMode.JPEG
+    fun getIsFlashEnabled(): Boolean = networkService?.isFlashEnabled?.value ?: false
+    fun getFlashIntensity(): Int = networkService?.flashIntensity?.value ?: 3
     fun getDngWriterThreads(): Int = dngWriterThreads
 
     override fun setIso(value: Int) {
@@ -397,12 +423,30 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         broadcastSettings()
     }
 
+    override fun setCaptureMode(value: NetworkService.CaptureMode) {
+        networkService?.updateCaptureMode(value)
+        sharedPreferences.edit { putString("captureMode", value.name) }
+        broadcastSettings()
+    }
+
+    override fun setFlashEnabled(value: Boolean) {
+        networkService?.updateFlashEnabled(value)
+        sharedPreferences.edit { putBoolean("isFlashEnabled", value) }
+        broadcastSettings()
+    }
+
+    override fun setFlashIntensity(value: Int) {
+        networkService?.updateFlashIntensity(value)
+        sharedPreferences.edit { putInt("flashIntensity", value) }
+        broadcastSettings()
+    }
+
     fun broadcastSettings() {
         if (role == "PRIMARY") {
             val ns = networkService ?: return
             val commandId = UUID.randomUUID().toString()
             ns.broadcastMessage(NetworkService.Message.SetParams(
-                ns.shutterSpeed.value, ns.iso.value, ns.captureRate.value, ns.captureLimit.value, ns.projectName.value, commandId
+                ns.shutterSpeed.value, ns.iso.value, ns.captureRate.value, ns.captureLimit.value, ns.projectName.value, ns.captureMode.value, ns.isFlashEnabled.value, ns.flashIntensity.value, commandId
             ))
         }
     }
@@ -433,7 +477,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     }
 
     private fun executeStartCapture(isNetworkTriggered: Boolean) {
-        Log.d(tag, "executeStartCapture: networkTriggered=$isNetworkTriggered, isArmed=${getIsArmed()}")
         if (getIsArmed() || isNetworkTriggered) {
             runOnUiThread { 
                 captureInProgressBorder.visibility = View.VISIBLE 
@@ -453,7 +496,6 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     }
 
     private fun executeStopCapture(isNetworkTriggered: Boolean) {
-        Log.d(tag, "executeStopCapture: networkTriggered=$isNetworkTriggered")
         runOnUiThread { 
             captureInProgressBorder.visibility = View.GONE 
             if (role == "PRIMARY") {

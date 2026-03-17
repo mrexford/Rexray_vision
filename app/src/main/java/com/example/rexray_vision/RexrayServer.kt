@@ -84,11 +84,16 @@ class RexrayServer(
                         is NetworkService.Message.StatusUpdate -> {
                             _connectedClients.update { clients ->
                                 val updated = clients.toMutableMap()
-                                updated[socket]?.let {
-                                    updated[socket] = it.copy(
+                                val existing = updated[socket]
+                                if (existing != null) {
+                                    updated[socket] = existing.copy(
                                         imageCount = message.imageCount,
                                         isArmed = message.isArmed,
                                         cameraName = message.cameraName
+                                    )
+                                } else {
+                                    updated[socket] = NetworkService.ClientStatus(
+                                        socket, message.imageCount, message.isArmed, message.cameraName
                                     )
                                 }
                                 updated
@@ -97,8 +102,9 @@ class RexrayServer(
                         is NetworkService.Message.UpdateCameraName -> {
                             _connectedClients.update { clients ->
                                 val updated = clients.toMutableMap()
-                                updated[socket]?.let {
-                                    updated[socket] = it.copy(cameraName = message.name)
+                                val existing = updated[socket]
+                                if (existing != null) {
+                                    updated[socket] = existing.copy(cameraName = message.name)
                                 }
                                 updated
                             }

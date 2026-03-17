@@ -56,6 +56,8 @@ class NetworkService : Service() {
 
     // Session State Master Variables
     enum class ServiceRole { IDLE, PRIMARY, CLIENT }
+    enum class CaptureMode { RAW, JPEG }
+
     private val _serviceRole = MutableStateFlow(ServiceRole.IDLE)
     val serviceRole = _serviceRole.asStateFlow()
 
@@ -76,6 +78,15 @@ class NetworkService : Service() {
 
     private val _projectName = MutableStateFlow("DefaultProject")
     val projectName = _projectName.asStateFlow()
+
+    private val _captureMode = MutableStateFlow(CaptureMode.JPEG)
+    val captureMode = _captureMode.asStateFlow()
+
+    private val _isFlashEnabled = MutableStateFlow(false)
+    val isFlashEnabled = _isFlashEnabled.asStateFlow()
+
+    private val _flashIntensity = MutableStateFlow(3) // 1, 2, or 3
+    val flashIntensity = _flashIntensity.asStateFlow()
 
     private val _isReady = MutableStateFlow(false)
     val isReady = _isReady.asStateFlow()
@@ -120,7 +131,17 @@ class NetworkService : Service() {
     )
 
     sealed class Message {
-        data class SetParams(val shutterSpeed: Long, val iso: Int, val captureRate: Int, val captureCount: Int, val projectName: String, val commandId: String) : Message()
+        data class SetParams(
+            val shutterSpeed: Long,
+            val iso: Int,
+            val captureRate: Int,
+            val captureCount: Int,
+            val projectName: String,
+            val captureMode: CaptureMode,
+            val isFlashEnabled: Boolean,
+            val flashIntensity: Int,
+            val commandId: String
+        ) : Message()
         data class ArmCapture(val commandId: String) : Message()
         data class DisarmCapture(val commandId: String) : Message()
         data class StartCapture(val commandId: String) : Message()
@@ -138,7 +159,7 @@ class NetworkService : Service() {
         fun getService(): NetworkService = this@NetworkService
     }
 
-    override fun onBind(intent: Intent): IBinder {
+    override fun onBind(intent: Intent): IBinder? {
         return binder
     }
 
@@ -201,6 +222,9 @@ class NetworkService : Service() {
                 _captureRate.value = message.captureRate
                 _captureLimit.value = message.captureCount
                 _projectName.value = message.projectName
+                _captureMode.value = message.captureMode
+                _isFlashEnabled.value = message.isFlashEnabled
+                _flashIntensity.value = message.flashIntensity
             }
             is Message.ArmCapture -> _isArmed.value = true
             is Message.DisarmCapture -> _isArmed.value = false
@@ -220,6 +244,9 @@ class NetworkService : Service() {
     fun updateShutterSpeed(value: Long) { _shutterSpeed.value = value }
     fun updateCaptureRate(value: Int) { _captureRate.value = value }
     fun updateCaptureLimit(value: Int) { _captureLimit.value = value }
+    fun updateCaptureMode(mode: CaptureMode) { _captureMode.value = mode }
+    fun updateFlashEnabled(enabled: Boolean) { _isFlashEnabled.value = enabled }
+    fun updateFlashIntensity(intensity: Int) { _flashIntensity.value = intensity }
     fun updateArmingStatus(armed: Boolean) { _isArmed.value = armed }
 
     private fun acquireMulticastLock() {

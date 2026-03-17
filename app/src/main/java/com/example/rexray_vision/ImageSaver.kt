@@ -1,6 +1,7 @@
 package com.example.rexray_vision
 
 import android.content.Context
+import android.graphics.*
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
@@ -8,7 +9,6 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
-import android.view.WindowManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
@@ -21,12 +21,11 @@ import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.system.measureTimeMillis
 
 class ImageSaver(
     private val context: Context,
     private val characteristics: CameraCharacteristics,
-    private val byteBufferPool: ByteBufferPool,
+    private val byteBufferPool: ByteBufferPool?,
     private val onImagesSaved: (Int) -> Unit,
     private val threadCount: Int
 ) {
@@ -38,11 +37,10 @@ class ImageSaver(
     private val _activeTaskCount = MutableStateFlow(0)
     val activeTaskCount = _activeTaskCount.asStateFlow()
 
-    data class ImageSaveRequest(
-        val buffer: ByteBuffer,
-        val result: TotalCaptureResult,
-        val rotation: Int
-    )
+    sealed class ImageSaveRequest {
+        data class Raw(val buffer: ByteBuffer, val result: TotalCaptureResult, val rotation: Int) : ImageSaveRequest()
+        data class Jpeg(val bytes: ByteArray, val timestamp: Long, val rotation: Int) : ImageSaveRequest()
+    }
 
     fun start() {
         Log.d(tag, "Starting ImageSaver.")
@@ -72,14 +70,21 @@ class ImageSaver(
         _activeTaskCount.value = 0
     }
 
-    fun save(buffer: ByteBuffer, result: TotalCaptureResult, rotation: Int) {
+    fun saveRaw(buffer: ByteBuffer, result: TotalCaptureResult, rotation: Int) {
         val timestamp = result.get(TotalCaptureResult.SENSOR_TIMESTAMP)!!
-        Log.d(tag, "save - Queuing image with timestamp $timestamp. Buffer capacity: ${buffer.capacity()}. Queue size: ${imageQueue.size}")
         _activeTaskCount.value++
-        if (!imageQueue.offer(ImageSaveRequest(buffer, result, rotation))) {
-            Log.w(tag, "Image queue full, dropping frame for timestamp $timestamp.")
+        if (!imageQueue.offer(ImageSaveRequest.Raw(buffer, result, rotation))) {
+            Log.w(tag, "Image queue full, dropping RAW frame for timestamp $timestamp.")
             _activeTaskCount.value--
-            byteBufferPool.release(buffer)
+            byteBufferPool?.release(buffer)
+        }
+    }
+
+    fun saveJpeg(bytes: ByteArray, timestamp: Long, rotation: Int) {
+        _activeTaskCount.value++
+        if (!imageQueue.offer(ImageSaveRequest.Jpeg(bytes, timestamp, rotation))) {
+            Log.w(tag, "Image queue full, dropping JPEG frame for timestamp $timestamp.")
+            _activeTaskCount.value--
         }
     }
 
@@ -95,32 +100,41 @@ class ImageSaver(
         while (!Thread.currentThread().isInterrupted) {
             try {
                 val request = imageQueue.take()
-                val (buffer, result, rotation) = request
-                val timestamp = result.get(TotalCaptureResult.SENSOR_TIMESTAMP)!!
-                Log.d(tag, "runnable - Dequeued image with timestamp $timestamp. Buffer capacity: ${buffer.capacity()}. Remaining in queue: ${imageQueue.size}")
-
+                
                 val activity = context as? CaptureActivity
                 val projectName = activity?.getProjectName() ?: "DefaultProject"
                 val cameraName = activity?.getCameraName() ?: "DefaultCamera"
 
-                val dngCreator = DngCreator(characteristics, result)
-                val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION)!!
-                dngCreator.setOrientation(getExifOrientation(rotation, sensorOrientation))
+                when (request) {
+                    is ImageSaveRequest.Raw -> {
+                        val (buffer, result, rotation) = request
+                        val timestamp = result.get(TotalCaptureResult.SENSOR_TIMESTAMP)!!
+                        val dngCreator = DngCreator(characteristics, result)
+                        val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION)!!
+                        dngCreator.setOrientation(getExifOrientation(rotation, sensorOrientation))
 
-                Log.d(tag, "runnable - Attempting to save DNG for timestamp $timestamp.")
-                try {
-                    if (saveImageToCache(dngCreator, buffer, projectName, cameraName, timestamp)) {
-                        savedImageCount.incrementAndGet()
+                        try {
+                            if (saveRawToCache(dngCreator, buffer, projectName, cameraName, timestamp)) {
+                                savedImageCount.incrementAndGet()
+                            }
+                        } finally {
+                            _activeTaskCount.value--
+                            byteBufferPool?.release(buffer)
+                        }
                     }
-                } finally {
-                    _activeTaskCount.value--
-                    // IMPORTANT: Release the buffer back to the pool
-                    byteBufferPool.release(buffer)
-                    Log.d(tag, "runnable - Released buffer for timestamp $timestamp back to pool. Active tasks: ${_activeTaskCount.value}")
+                    is ImageSaveRequest.Jpeg -> {
+                        val (bytes, timestamp, _) = request
+                        try {
+                            if (saveJpegToCache(bytes, projectName, cameraName, timestamp)) {
+                                savedImageCount.incrementAndGet()
+                            }
+                        } finally {
+                            _activeTaskCount.value--
+                        }
+                    }
                 }
 
             } catch (_: InterruptedException) {
-                Log.d(tag, "ImageSaver runnable interrupted. Shutting down.")
                 Thread.currentThread().interrupt()
             } catch (e: Exception) {
                 Log.e(tag, "Error saving image", e)
@@ -128,39 +142,50 @@ class ImageSaver(
         }
     }
 
-    private fun saveImageToCache(dngCreator: DngCreator, buffer: ByteBuffer, projectName: String, cameraName: String, timestamp: Long): Boolean {
-        val bootTimeMs = System.currentTimeMillis() - (SystemClock.elapsedRealtimeNanos() / 1_000_000)
-        val epochMs = bootTimeMs + (timestamp / 1_000_000)
-        val timeStampFormatted = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date(epochMs))
-        val fileName = "${projectName}_${cameraName}_$timeStampFormatted.dng"
-
-        val cacheDir = File(context.filesDir, "dng_cache")
-        if (!cacheDir.exists()) {
-            cacheDir.mkdirs()
-        }
-        val dngFile = File(cacheDir, fileName)
+    private fun saveRawToCache(dngCreator: DngCreator, buffer: ByteBuffer, projectName: String, cameraName: String, timestamp: Long): Boolean {
+        val fileName = generateFileName(projectName, cameraName, timestamp, "dng")
+        val dngFile = File(getCacheDir(), fileName)
 
         try {
             FileOutputStream(dngFile).use { outputStream ->
-                val totalTime = measureTimeMillis {
-                    val size = characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
-                    if (size != null) {
-                        dngCreator.writeByteBuffer(outputStream, size, buffer, 0L)
-                    } else {
-                        throw RuntimeException("SENSOR_INFO_PIXEL_ARRAY_SIZE is null")
-                    }
-                }
-                Log.d("ImageSaver_ProcessAndIO", "DNG processing and writing took $totalTime ms")
+                val size = characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)!!
+                dngCreator.writeByteBuffer(outputStream, size, buffer, 0L)
             }
-            Log.i(tag, "DNG_SAVE_SUCCESS: $fileName, Path: ${dngFile.absolutePath}")
+            Log.i(tag, "RAW_SAVE_SUCCESS: $fileName")
             return true
         } catch (e: Exception) {
-            Log.e(tag, "Failed to save DNG to cache: $fileName", e)
-            if (dngFile.exists()) {
-                dngFile.delete()
-            }
+            Log.e(tag, "Failed to save DNG: $fileName", e)
+            if (dngFile.exists()) dngFile.delete()
         }
         return false
+    }
+
+    private fun saveJpegToCache(bytes: ByteArray, projectName: String, cameraName: String, timestamp: Long): Boolean {
+        val fileName = generateFileName(projectName, cameraName, timestamp, "jpg")
+        val jpegFile = File(getCacheDir(), fileName)
+
+        try {
+            FileOutputStream(jpegFile).use { it.write(bytes) }
+            Log.i(tag, "JPEG_SAVE_SUCCESS: $fileName")
+            return true
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to save JPEG: $fileName", e)
+            if (jpegFile.exists()) jpegFile.delete()
+        }
+        return false
+    }
+
+    private fun generateFileName(projectName: String, cameraName: String, timestamp: Long, extension: String): String {
+        val bootTimeMs = System.currentTimeMillis() - (SystemClock.elapsedRealtimeNanos() / 1_000_000)
+        val epochMs = bootTimeMs + (timestamp / 1_000_000)
+        val timeStampFormatted = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date(epochMs))
+        return "${projectName}_${cameraName}_$timeStampFormatted.$extension"
+    }
+
+    private fun getCacheDir(): File {
+        val dir = File(context.filesDir, "dng_cache") 
+        if (!dir.exists()) dir.mkdirs()
+        return dir
     }
 
     private fun getExifOrientation(rotation: Int, sensorOrientation: Int): Int {
@@ -173,10 +198,10 @@ class ImageSaver(
         }
         val result = (sensorOrientation - degrees + 360) % 360
         return when (result) {
-            90 -> androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90
-            180 -> androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180
-            270 -> androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270
-            else -> androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL
+            90 -> 6
+            180 -> 3
+            270 -> 8
+            else -> 1
         }
     }
 }

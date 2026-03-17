@@ -6,6 +6,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
+import androidx.appcompat.widget.SwitchCompat
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -26,6 +27,9 @@ class PrimaryControlsFragment : Fragment() {
         fun setShutterSpeed(value: Long)
         fun setCaptureRate(value: Int)
         fun setCaptureLimit(value: Int)
+        fun setCaptureMode(value: NetworkService.CaptureMode)
+        fun setFlashEnabled(value: Boolean)
+        fun setFlashIntensity(value: Int)
         fun onCloseApp()
     }
 
@@ -52,6 +56,9 @@ class PrimaryControlsFragment : Fragment() {
     private lateinit var closeAppButton: Button
     private lateinit var autoIsoIndicator: TextView
     private lateinit var captureCounter: TextView
+    private lateinit var captureModeSwitch: SwitchCompat
+    private lateinit var flashToggleSwitch: SwitchCompat
+    private lateinit var flashIntensitySeekBar: SeekBar
 
     // MIGRATION UI
     private lateinit var migrationOverlay: ConstraintLayout
@@ -99,6 +106,9 @@ class PrimaryControlsFragment : Fragment() {
         closeAppButton = view.findViewById(R.id.closeAppButton)
         autoIsoIndicator = view.findViewById(R.id.autoIsoIndicator)
         captureCounter = view.findViewById(R.id.captureCounter)
+        captureModeSwitch = view.findViewById(R.id.captureModeSwitch)
+        flashToggleSwitch = view.findViewById(R.id.flashToggleSwitch)
+        flashIntensitySeekBar = view.findViewById(R.id.flashIntensitySeekBar)
 
         migrationOverlay = view.findViewById(R.id.migrationOverlay)
         migrationStatusTextView = view.findViewById(R.id.migrationStatusTextView)
@@ -125,6 +135,10 @@ class PrimaryControlsFragment : Fragment() {
         captureRateSeekBar.max = 15
         captureLimitSeekBar.min = 1
         captureLimitSeekBar.max = 300
+        
+        // 3 Levels: 1 (Low), 2 (Med), 3 (High)
+        flashIntensitySeekBar.min = 1
+        flashIntensitySeekBar.max = 3
     }
 
     private fun setupListeners() {
@@ -179,6 +193,23 @@ class PrimaryControlsFragment : Fragment() {
             override fun onStartTrackingTouch(seekBar: SeekBar) {}
             override fun onStopTrackingTouch(seekBar: SeekBar) {}
         })
+
+        captureModeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            val mode = if (isChecked) NetworkService.CaptureMode.RAW else NetworkService.CaptureMode.JPEG
+            listener?.setCaptureMode(mode)
+        }
+
+        flashToggleSwitch.setOnCheckedChangeListener { _, isChecked ->
+            listener?.setFlashEnabled(isChecked)
+        }
+
+        flashIntensitySeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) listener?.setFlashIntensity(progress)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+        })
     }
 
     fun updateDiskWriteProgress(pendingCount: Int) {
@@ -189,11 +220,9 @@ class PrimaryControlsFragment : Fragment() {
                 migrationProgressBar.isIndeterminate = true
                 migrationProgressTextView.text = getString(R.string.migration_remaining_format, pendingCount)
                 
-                // Block capture
                 armButton.isEnabled = false
                 captureButton.isEnabled = false
             } else {
-                // If not migrating, hide. If migrating, the other method will handle visibility
                 if (migrationStatusTextView.text != getString(R.string.migration_moving_to_gallery)) {
                     migrationOverlay.visibility = View.GONE
                     updateArmingState((activity as? CaptureActivity)?.getIsArmed() ?: false)
@@ -211,7 +240,6 @@ class PrimaryControlsFragment : Fragment() {
                 migrationProgressBar.progress = progress
                 migrationProgressTextView.text = getString(R.string.migration_percentage_format, progress)
                 
-                // Block capture
                 armButton.isEnabled = false
                 captureButton.isEnabled = false
             } else {
@@ -246,8 +274,18 @@ class PrimaryControlsFragment : Fragment() {
             captureLimitValueTextView.text = getString(R.string.capture_limit_format, it.getCaptureLimit())
             captureLimitSeekBar.progress = it.getCaptureLimit()
 
+            val currentMode = it.getCaptureMode()
+            captureModeSwitch.isChecked = currentMode == NetworkService.CaptureMode.RAW
+            captureModeSwitch.text = if (currentMode == NetworkService.CaptureMode.RAW) "Raw Mode: ON" else "Raw Mode: OFF"
+
+            val isFlashEnabled = it.getIsFlashEnabled()
+            flashToggleSwitch.isChecked = isFlashEnabled
+            flashToggleSwitch.text = if (isFlashEnabled) "Flash: ON" else "Flash: OFF"
+            flashIntensitySeekBar.isEnabled = isFlashEnabled
+            flashIntensitySeekBar.progress = it.getFlashIntensity()
+
             val shutterSpeedString = "1/${shutterInv.toLong()}"
-            val settingsText = "ISO: ${it.getIso()}\nS: $shutterSpeedString\nFPS: ${it.getCaptureRate()}\nLimit: ${it.getCaptureLimit()}"
+            val settingsText = "ISO: ${it.getIso()}\nS: $shutterSpeedString\nFPS: ${it.getCaptureRate()}\nLimit: ${it.getCaptureLimit()}\nMode: $currentMode"
             settingsDisplayTextView.text = settingsText
 
             projectNameTextView.text = getString(R.string.project_name_prefix, it.getProjectName())
@@ -267,7 +305,6 @@ class PrimaryControlsFragment : Fragment() {
         activity?.runOnUiThread {
             captureButton.text = if (isCapturing) "Stop" else "Capture"
             captureCounter.visibility = if (isCapturing || captureCounter.text.toString().toIntOrNull() ?: 0 > 0) View.VISIBLE else View.INVISIBLE
-            // Disable arm button during capture
             armButton.isEnabled = !isCapturing
         }
     }

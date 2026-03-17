@@ -30,26 +30,27 @@ class CaptureStateHandler(
         Log.d(tag, "handleImage - Timestamp: $timestamp. Pending results: ${pendingResults.size}, Pending buffers: ${pendingBuffers.size}")
 
         try {
-            val imageBuffer = image.planes[0].buffer
-            val rowStride = image.planes[0].rowStride
-            val pixelStride = image.planes[0].pixelStride
+            val plane = image.planes[0]
+            val imageBuffer = plane.buffer
+            val rowStride = plane.rowStride
+            val pixelStride = plane.pixelStride
 
             // Efficient, zero-allocation row-by-row copy
             val rowWidthInBytes = image.width * pixelStride
             
-            // Safety Check: Verify buffer has enough capacity for the actual image layout (including strides)
-            if (buffer.remaining() < (rowStride * image.height)) {
-                Log.e(tag, "handleImage - Buffer capacity (${buffer.capacity()}) is smaller than required image layout (${rowStride * image.height})")
-                byteBufferPool.release(buffer)
-                return
-            }
-
-            for (y in 0 until image.height) {
-                val rowOffset = y * rowStride
-                imageBuffer.position(rowOffset)
-                imageBuffer.limit(rowOffset + rowWidthInBytes)
+            // Optimization: If there's no stride padding, perform a single bulk copy.
+            if (rowStride == rowWidthInBytes) {
+                imageBuffer.rewind()
                 buffer.put(imageBuffer)
+            } else {
+                for (y in 0 until image.height) {
+                    val rowOffset = y * rowStride
+                    imageBuffer.position(rowOffset)
+                    imageBuffer.limit(rowOffset + rowWidthInBytes)
+                    buffer.put(imageBuffer)
+                }
             }
+            
             buffer.flip()
             Log.d(tag, "handleImage - Copied image data to buffer for timestamp $timestamp")
 
@@ -72,9 +73,8 @@ class CaptureStateHandler(
 
         val buffer = pendingBuffers.remove(timestamp)
         if (buffer != null) {
-            Log.d(tag, "handleResult - Found matching buffer for $timestamp. Firing callback and releasing buffer.")
+            Log.d(tag, "handleResult - Found matching buffer for $timestamp. Firing callback.")
             onCaptureAvailable(buffer, result)
-            byteBufferPool.release(buffer)
         } else {
             Log.d(tag, "handleResult - No buffer for $timestamp yet. Storing result.")
             pendingResults[timestamp] = result

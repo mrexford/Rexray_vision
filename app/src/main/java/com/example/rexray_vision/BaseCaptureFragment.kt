@@ -7,6 +7,7 @@ import android.graphics.Matrix
 import android.graphics.RectF
 import android.hardware.camera2.*
 import android.media.Image
+import android.media.ImageReader
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -19,6 +20,9 @@ import android.view.ViewGroup
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -52,8 +56,8 @@ class BaseCaptureFragment : Fragment() {
     private lateinit var backgroundHandler: Handler
     private lateinit var cameraExecutor: ExecutorService
 
-    private lateinit var byteBufferPool: ByteBufferPool
-    private lateinit var captureStateHandler: CaptureStateHandler
+    private var byteBufferPool: ByteBufferPool? = null
+    private var captureStateHandler: CaptureStateHandler? = null
     private lateinit var imageSaver: ImageSaver
 
     private val isCapturing = AtomicBoolean(false)
@@ -69,7 +73,6 @@ class BaseCaptureFragment : Fragment() {
     private val isAwaitingMigration = AtomicBoolean(false)
     private var burstRotation = Surface.ROTATION_0
 
-    // PID gains
     private val pGain = .8
     private val iGain = 0.01
     private val dGain = 1.1
@@ -84,28 +87,7 @@ class BaseCaptureFragment : Fragment() {
         override fun onOpened(camera: CameraDevice) {
             Log.d(tag, "Camera device opened.")
             rexrayCameraManager.cameraDevice = camera
-            val characteristics = cameraManager.getCameraCharacteristics(camera.id)
-            val configurationMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val rawSize = configurationMap?.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)?.get(0)
-            
-            if (rawSize != null) {
-                // Calculation Fix: Use 2.5 bytes per pixel (25% overhead) to accommodate hardware stride padding
-                // and non-standard packing formats found on physical hardware (e.g. Pixel 6).
-                val bufferSize = (rawSize.width * rawSize.height * 2.5).toInt()
-                Log.d(tag, "Initializing ByteBufferPool for RAW capture. Size: $rawSize, BufferSize: $bufferSize bytes")
-                byteBufferPool = ByteBufferPool(bufferSize, 30)
-                
-                val dngWriterThreads = (activity as? CaptureActivity)?.getDngWriterThreads() ?: 1
-                imageSaver = ImageSaver(requireContext(), characteristics, byteBufferPool, {}, dngWriterThreads)
-                imageSaver.start()
-                captureStateHandler = CaptureStateHandler(::handleImageCapture, byteBufferPool)
-                createCameraPreviewSession()
-            } else {
-                Log.e(tag, "Failed to get RAW_SENSOR output sizes.")
-                activity?.runOnUiThread {
-                    Toast.makeText(requireContext(), "RAW Capture not supported on this device.", Toast.LENGTH_LONG).show()
-                }
-            }
+            initializeResourcesAndSession(camera)
         }
 
         override fun onDisconnected(camera: CameraDevice) {
@@ -128,6 +110,39 @@ class BaseCaptureFragment : Fragment() {
             if (::rexrayCameraManager.isInitialized) {
                 rexrayCameraManager.cameraClosed.release()
             }
+        }
+    }
+
+    private fun initializeResourcesAndSession(camera: CameraDevice) {
+        val characteristics = cameraManager.getCameraCharacteristics(camera.id)
+        val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.RAW
+        
+        if (mode == NetworkService.CaptureMode.RAW) {
+            val configurationMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val rawSize = configurationMap?.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)?.get(0)
+            
+            if (rawSize != null) {
+                val bufferSize = (rawSize.width * rawSize.height * 2.5).toInt()
+                Log.d(tag, "Initializing ByteBufferPool for RAW capture. Size: $rawSize, BufferSize: $bufferSize bytes")
+                byteBufferPool = ByteBufferPool(bufferSize, 15)
+                
+                val dngWriterThreads = (activity as? CaptureActivity)?.getDngWriterThreads() ?: 1
+                imageSaver = ImageSaver(requireContext(), characteristics, byteBufferPool, {}, dngWriterThreads)
+                imageSaver.start()
+                captureStateHandler = CaptureStateHandler(::handleRawCapture, byteBufferPool!!)
+                createCameraPreviewSession()
+            } else {
+                Log.e(tag, "Failed to get RAW_SENSOR output sizes.")
+                activity?.runOnUiThread {
+                    Toast.makeText(requireContext(), "RAW Capture not supported on this device.", Toast.LENGTH_LONG).show()
+                }
+            }
+        } else {
+            Log.d(tag, "Initializing resources for JPEG capture.")
+            val dngWriterThreads = (activity as? CaptureActivity)?.getDngWriterThreads() ?: 1
+            imageSaver = ImageSaver(requireContext(), characteristics, null, {}, dngWriterThreads)
+            imageSaver.start()
+            createCameraPreviewSession()
         }
     }
 
@@ -172,6 +187,23 @@ class BaseCaptureFragment : Fragment() {
         startBackgroundThread()
         rexrayCameraManager = RexrayCameraManager(requireContext(), backgroundHandler)
         cameraSessionManager = CameraSessionManager(rexrayCameraManager, backgroundHandler, cameraExecutor)
+        
+        lifecycleScope.launch {
+            (activity as? CaptureActivity)?.networkService?.captureMode?.collectLatest { mode ->
+                Log.d(tag, "Capture mode changed to: $mode. Reconfiguring session.")
+                rexrayCameraManager.cameraDevice?.let { camera ->
+                    cameraExecutor.execute {
+                        cameraSessionManager.close()
+                        if (this@BaseCaptureFragment::imageSaver.isInitialized) {
+                            imageSaver.stop()
+                        }
+                        activity?.runOnUiThread {
+                            initializeResourcesAndSession(camera)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     override fun onResume() {
@@ -230,21 +262,33 @@ class BaseCaptureFragment : Fragment() {
         rexrayCameraManager.previewSize?.let { texture.setDefaultBufferSize(it.width, it.height) }
         previewSurface = Surface(texture)
 
-        rexrayCameraManager.rawImageReader.setOnImageAvailableListener({ reader ->
-            val image = try { reader.acquireNextImage() } catch (_: IllegalStateException) { null }
-            if (image != null) {
-                Log.d(tag, "onImageAvailable - Timestamp: ${image.timestamp}")
-                if (isCapturing.get()) {
-                    captureStateHandler.handleImage(image)
-                } else {
-                    image.close()
-                }
-            } else {
-                Log.w(tag, "onImageAvailable - Failed to acquire image.")
-            }
-        }, backgroundHandler)
+        val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.RAW
 
-        rexrayCameraManager.analysisImageReader.setOnImageAvailableListener({ reader ->
+        if (mode == NetworkService.CaptureMode.RAW) {
+            rexrayCameraManager.rawImageReader.setOnImageAvailableListener({ reader: ImageReader ->
+                val image = try { reader.acquireNextImage() } catch (_: IllegalStateException) { null }
+                if (image != null) {
+                    if (isCapturing.get()) {
+                        captureStateHandler?.handleImage(image)
+                    } else {
+                        image.close()
+                    }
+                }
+            }, backgroundHandler)
+        } else {
+            rexrayCameraManager.jpegImageReader.setOnImageAvailableListener({ reader: ImageReader ->
+                val image = try { reader.acquireNextImage() } catch (_: IllegalStateException) { null }
+                if (image != null) {
+                    if (isCapturing.get()) {
+                        handleJpegCapture(image)
+                    } else {
+                        image.close()
+                    }
+                }
+            }, backgroundHandler)
+        }
+
+        rexrayCameraManager.analysisImageReader.setOnImageAvailableListener({ reader: ImageReader ->
             val image: Image? = try { reader.acquireNextImage() } catch (_: IllegalStateException) { null }
             image?.let {
                 val histogram = exposureAnalysisStrategy.getHistogram(it)
@@ -325,7 +369,6 @@ class BaseCaptureFragment : Fragment() {
             previousError = error
 
             if (newIso != currentIso) {
-                // Modified: Only update internal state, do not trigger immediate broadcast
                 (activity as? CaptureActivity)?.networkService?.updateIso(newIso)
                 (activity as? CaptureActivity)?.updatePreview()
             }
@@ -342,7 +385,6 @@ class BaseCaptureFragment : Fragment() {
             integral = 0.0
             previousError = 0.0
         } else {
-            // Send final sync when disabled
             (activity as? CaptureActivity)?.broadcastSettings()
         }
         listener?.onAutoIsoStateChanged(newState)
@@ -360,15 +402,21 @@ class BaseCaptureFragment : Fragment() {
     fun startBurstCapture(iso: Int, shutterSpeed: Long, captureRate: Int, captureLimit: Int) {
         Log.d(tag, "Starting burst capture.")
         capturedImageCount.set(0)
+        // Reset migration flag at start of burst
         isAwaitingMigration.set(false)
         burstRotation = activity?.windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
-        captureStateHandler.clear()
+        
+        val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.RAW
+        if (mode == NetworkService.CaptureMode.RAW) {
+            captureStateHandler?.clear()
+        }
+
         val captureCallback = object : CameraCaptureSession.CaptureCallback() {
             override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
-                val timestamp = result.get(TotalCaptureResult.SENSOR_TIMESTAMP)!!
-                Log.d(tag, "onCaptureCompleted - Timestamp: $timestamp")
                 if (isCapturing.get()) {
-                    captureStateHandler.handleResult(result)
+                    if (mode == NetworkService.CaptureMode.RAW) {
+                        captureStateHandler?.handleResult(result)
+                    }
                 }
             }
         }
@@ -383,7 +431,12 @@ class BaseCaptureFragment : Fragment() {
             activity?.let {
                 cameraSessionManager.stopBurstAndResumePreview(it.getIso(), it.getShutterSpeed())
             }
-            captureStateHandler.clear()
+            
+            val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.RAW
+            if (mode == NetworkService.CaptureMode.RAW) {
+                captureStateHandler?.clear()
+            }
+            // Set migration flag only when burst explicitly stops
             isAwaitingMigration.set(true)
         }
     }
@@ -394,23 +447,42 @@ class BaseCaptureFragment : Fragment() {
         isAwaitingMigration.set(false)
     }
 
-    private fun handleImageCapture(buffer: ByteBuffer, result: TotalCaptureResult) {
-        val timestamp = result.get(TotalCaptureResult.SENSOR_TIMESTAMP)!!
-        Log.d(tag, "handleImageCapture (callback) - Timestamp: $timestamp, Buffer capacity: ${buffer.capacity()}")
+    private fun handleRawCapture(buffer: ByteBuffer, result: TotalCaptureResult) {
         val count = capturedImageCount.incrementAndGet()
         val captureLimit = (activity as? CaptureActivity)?.getCaptureLimit() ?: 0
         if (count <= captureLimit) {
-            imageSaver.save(buffer, result, burstRotation)
+            imageSaver.saveRaw(buffer, result, burstRotation)
             listener?.onImageCaptured()
             if (count == captureLimit) {
-                Log.d(tag, "Capture limit reached.")
                 activity?.runOnUiThread {
                     listener?.onCaptureLimitReached()
                 }
             }
         } else {
-            Log.w(tag, "handleImageCapture - Capture limit exceeded, releasing buffer for timestamp $timestamp")
-            byteBufferPool.release(buffer)
+            byteBufferPool?.release(buffer)
+        }
+    }
+
+    private fun handleJpegCapture(image: Image) {
+        try {
+            val count = capturedImageCount.incrementAndGet()
+            val captureLimit = (activity as? CaptureActivity)?.getCaptureLimit() ?: 0
+            if (count <= captureLimit) {
+                val buffer = image.planes[0].buffer
+                val bytes = ByteArray(buffer.remaining())
+                buffer.get(bytes)
+                
+                imageSaver.saveJpeg(bytes, image.timestamp, burstRotation)
+                listener?.onImageCaptured()
+                
+                if (count == captureLimit) {
+                    activity?.runOnUiThread {
+                        listener?.onCaptureLimitReached()
+                    }
+                }
+            }
+        } finally {
+            image.close()
         }
     }
 
@@ -443,7 +515,16 @@ class BaseCaptureFragment : Fragment() {
         cameraExecutor = Executors.newSingleThreadExecutor()
     }
 
-    private fun stopBackgroundThread() {}
+    private fun stopBackgroundThread() {
+        backgroundThread.quitSafely()
+        try {
+            backgroundThread.join()
+            cameraExecutor.shutdown()
+            cameraExecutor.awaitTermination(1, TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            Log.e(tag, "Error stopping background thread", e)
+        }
+    }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)

@@ -41,7 +41,7 @@ class FileMigrationService : LifecycleService() {
         fun getService(): FileMigrationService = this@FileMigrationService
     }
 
-    override fun onBind(intent: Intent): IBinder {
+    override fun onBind(intent: Intent): IBinder? {
         super.onBind(intent)
         return binder
     }
@@ -67,7 +67,12 @@ class FileMigrationService : LifecycleService() {
         lifecycleScope.launch {
             _isMigrating.value = true
             val cacheDir = File(cacheDirPath)
-            val files = cacheDir.listFiles()?.filter { it.isFile && it.extension == "dng" } ?: emptyList()
+            
+            // Optimization: Sort files by name (which contains timestamp) to ensure chronological migration
+            val files = cacheDir.listFiles()
+                ?.filter { it.isFile && (it.extension == "dng" || it.extension == "jpg") }
+                ?.sortedBy { it.name } ?: emptyList()
+
             val totalFiles = files.size
 
             if (totalFiles == 0) {
@@ -81,7 +86,7 @@ class FileMigrationService : LifecycleService() {
 
             withContext(Dispatchers.IO) {
                 files.forEachIndexed { index, file ->
-                    val progress = ((index.toFloat() / totalFiles) * 100).roundToInt()
+                    val progress = ((index.toFloat() / totalFiles) * 100).toInt()
                     _migrationProgress.value = progress
                     updateNotification(index + 1, totalFiles)
 
@@ -99,9 +104,10 @@ class FileMigrationService : LifecycleService() {
 
     private fun migrateFile(file: File) {
         try {
+            val isDng = file.extension == "dng"
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
-                put(MediaStore.MediaColumns.MIME_TYPE, "image/x-adobe-dng")
+                put(MediaStore.MediaColumns.MIME_TYPE, if (isDng) "image/x-adobe-dng" else "image/jpeg")
                 put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Rexray_vision")
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
@@ -156,9 +162,6 @@ class FileMigrationService : LifecycleService() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(notificationId, notification)
     }
-
-    // Extension function for rounding since we need Int for progress
-    private fun Float.roundToInt(): Int = (this + 0.5f).toInt()
 
     companion object {
         const val ACTION_START_MIGRATION = "com.example.rexray_vision.START_MIGRATION"

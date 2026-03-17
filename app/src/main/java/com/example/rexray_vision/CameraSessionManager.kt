@@ -3,6 +3,7 @@ package com.example.rexray_vision
 import android.hardware.camera2.*
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.os.Build
 import android.os.Handler
 import android.util.Log
 import android.util.Range
@@ -26,13 +27,20 @@ class CameraSessionManager(
                 addTarget(rexrayCameraManager.analysisImageReader.surface)
             }
 
+            val outputConfigs = mutableListOf(
+                OutputConfiguration(previewSurface),
+                OutputConfiguration(rexrayCameraManager.analysisImageReader.surface)
+            )
+
+            if (rexrayCameraManager.isRawInitialized()) {
+                outputConfigs.add(OutputConfiguration(rexrayCameraManager.rawImageReader.surface))
+            } else if (rexrayCameraManager.isJpegInitialized()) {
+                outputConfigs.add(OutputConfiguration(rexrayCameraManager.jpegImageReader.surface))
+            }
+
             val sessionConfig = SessionConfiguration(
                 SessionConfiguration.SESSION_REGULAR,
-                listOf(
-                    OutputConfiguration(previewSurface),
-                    OutputConfiguration(rexrayCameraManager.rawImageReader.surface),
-                    OutputConfiguration(rexrayCameraManager.analysisImageReader.surface)
-                ),
+                outputConfigs,
                 cameraExecutor,
                 sessionStateCallback
             )
@@ -40,6 +48,26 @@ class CameraSessionManager(
         } catch (e: CameraAccessException) {
             Log.e(tag, "Failed to create camera session", e)
         }
+    }
+
+    private fun getFlashMaxLevel(): Int {
+        val cameraDevice = rexrayCameraManager.cameraDevice ?: return 1
+        val cameraManager = rexrayCameraManager.context.getSystemService(android.content.Context.CAMERA_SERVICE) as CameraManager
+        return try {
+            val characteristics = cameraManager.getCameraCharacteristics(cameraDevice.id)
+            if (Build.VERSION.SDK_INT >= 35) {
+                characteristics.get(CameraCharacteristics.FLASH_INFO_STRENGTH_MAXIMUM_LEVEL) ?: 1
+            } else {
+                1
+            }
+        } catch (e: Exception) {
+            1
+        }
+    }
+
+    private fun calculateFlashStrength(intensity: Int, maxLevel: Int): Int {
+        // User intensity is 1, 2, or 3. Map to maxLevel.
+        return (intensity.toFloat() / 3.0f * maxLevel).toInt().coerceAtLeast(1)
     }
 
     fun updatePreview(iso: Int, shutterSpeed: Long) {
@@ -53,6 +81,20 @@ class CameraSessionManager(
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             builder.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
             builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, shutterSpeed)
+            
+            // Ensure torch state is maintained in preview
+            val activity = rexrayCameraManager.context as? CaptureActivity
+            if (activity?.getIsFlashEnabled() == true) {
+                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                if (Build.VERSION.SDK_INT >= 35) {
+                    val maxLevel = getFlashMaxLevel()
+                    val strength = calculateFlashStrength(activity.getFlashIntensity(), maxLevel)
+                    builder.set(CaptureRequest.FLASH_STRENGTH_LEVEL, strength)
+                }
+            } else {
+                builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+            }
+
             cameraCaptureSession?.setRepeatingRequest(builder.build(), null, backgroundHandler)
         } catch (e: CameraAccessException) {
             Log.e(tag, "Failed to update preview", e)
@@ -70,7 +112,13 @@ class CameraSessionManager(
             }
 
             val captureBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                addTarget(rexrayCameraManager.rawImageReader.surface)
+                if (rexrayCameraManager.isRawInitialized()) {
+                    addTarget(rexrayCameraManager.rawImageReader.surface)
+                } else if (rexrayCameraManager.isJpegInitialized()) {
+                    addTarget(rexrayCameraManager.jpegImageReader.surface)
+                    set(CaptureRequest.JPEG_QUALITY, 100.toByte())
+                }
+                
                 addTarget(previewSurface)
                 set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                 set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
@@ -78,8 +126,24 @@ class CameraSessionManager(
                 set(CaptureRequest.SENSOR_SENSITIVITY, iso)
                 set(CaptureRequest.SENSOR_EXPOSURE_TIME, effectiveShutterSpeed)
                 set(CaptureRequest.SENSOR_FRAME_DURATION, frameDuration)
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(captureRate, captureRate))
+                
+                // Set torch mode for burst
+                val activity = rexrayCameraManager.context as? CaptureActivity
+                if (activity?.getIsFlashEnabled() == true) {
+                    set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                    if (Build.VERSION.SDK_INT >= 35) {
+                        val maxLevel = getFlashMaxLevel()
+                        val strength = calculateFlashStrength(activity.getFlashIntensity(), maxLevel)
+                        set(CaptureRequest.FLASH_STRENGTH_LEVEL, strength)
+                    }
+                } else {
+                    set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                }
+
                 set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_HIGH_QUALITY)
                 set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_HIGH_QUALITY)
+                set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_OFF)
             }
             cameraCaptureSession?.setRepeatingRequest(captureBuilder.build(), captureCallback, backgroundHandler)
         } catch(e: CameraAccessException) {
