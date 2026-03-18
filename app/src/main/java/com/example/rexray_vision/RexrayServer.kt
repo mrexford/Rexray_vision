@@ -32,7 +32,7 @@ class RexrayServer(
                 while (!socket.isClosed) {
                     try {
                         val client = socket.accept()
-                        Log.i(TAG, "Client connected: ${client.inetAddress.hostAddress}")
+                        Log.i(TAG, "Inbound connection from: ${client.inetAddress.hostAddress}")
                         handleClient(client)
                     } catch (e: IOException) {
                         if (socket.isClosed) break
@@ -65,18 +65,22 @@ class RexrayServer(
                 val reader = socket.getInputStream().bufferedReader()
                 while (socket.isConnected && !socket.isClosed) {
                     val line = reader.readLine() ?: break
-                    Log.d(TAG, "Incoming from $address: $line")
-                    val message = gson.fromJson(line, NetworkService.Message::class.java)
+                    val message = try {
+                        gson.fromJson(line, NetworkService.Message::class.java)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to parse message from $address: $line", e)
+                        null
+                    } ?: continue
                     
                     when (message) {
                         is NetworkService.Message.JoinGroup -> {
-                            Log.i(TAG, "Client $address joined group")
+                            Log.i(TAG, "HANDSHAKE SUCCESS: Client $address joined group. Adding to broadcast list.")
                             val status = NetworkService.ClientStatus(socket, 0, false)
                             _connectedClients.update { it + (socket to status) }
                             onClientConnected(socket)
                         }
                         is NetworkService.Message.LeaveGroup -> {
-                            Log.i(TAG, "Client $address requested to leave")
+                            Log.i(TAG, "Client $address gracefully leaving.")
                             _connectedClients.update { it - socket }
                             socket.close()
                             break
@@ -100,6 +104,7 @@ class RexrayServer(
                             }
                         }
                         is NetworkService.Message.UpdateCameraName -> {
+                            Log.d(TAG, "Updating camera name for $address to ${message.name}")
                             _connectedClients.update { clients ->
                                 val updated = clients.toMutableMap()
                                 val existing = updated[socket]
@@ -108,6 +113,9 @@ class RexrayServer(
                                 }
                                 updated
                             }
+                        }
+                        is NetworkService.Message.CommandAck -> {
+                            Log.d(TAG, "Command ACK from $address for ID: ${message.commandId}")
                         }
                         else -> onMessageReceived(socket, message)
                     }
@@ -124,7 +132,7 @@ class RexrayServer(
     fun broadcast(message: NetworkService.Message) {
         val json = gson.toJson(message)
         val clients = _connectedClients.value.values
-        Log.d(TAG, "Broadcasting to ${clients.size} clients: $json")
+        Log.d(TAG, "Broadcasting ${message::class.java.simpleName} to ${clients.size} clients.")
         
         clients.forEach { client ->
             executor.execute {
@@ -133,9 +141,8 @@ class RexrayServer(
                     writer.write(json)
                     writer.newLine()
                     writer.flush()
-                    Log.d(TAG, "Successfully sent to ${client.socket.inetAddress}")
                 } catch (e: IOException) {
-                    Log.e(TAG, "Error sending to ${client.socket.inetAddress}", e)
+                    Log.e(TAG, "Failed to send broadcast to ${client.socket.inetAddress}", e)
                 }
             }
         }

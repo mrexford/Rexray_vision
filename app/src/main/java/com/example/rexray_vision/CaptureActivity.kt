@@ -5,27 +5,33 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.SharedPreferences
-import android.hardware.camera2.CameraManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import java.io.File
-import java.net.Socket
+import kotlinx.coroutines.delay
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicBoolean
 
-class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentListener, PrimaryControlsFragment.PrimaryControlsListener, ClientControlsFragment.ClientControlsListener {
+class CaptureActivity : AppCompatActivity(), 
+    BaseCaptureFragment.CameraFragmentListener, 
+    PrimaryControlsFragment.PrimaryControlsListener, 
+    ClientControlsFragment.ClientControlsListener,
+    DualCameraManager.DualCameraListener {
 
     private val tag = "CaptureActivity"
     private lateinit var role: String
@@ -39,19 +45,32 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     private lateinit var sharedPreferences: SharedPreferences
     private var networkStateJob: Job? = null
     private var migrationStateJob: Job? = null
-    private var migrationTriggerJob: Job? = null
+    private var captureSafetyJob: Job? = null
 
     private lateinit var currentProjectName: String
     private lateinit var cameraName: String
     
-    private var dngWriterThreads = 4
     private var sessionCaptureCount = 0
+    private var dngWriterThreads = 4
 
     private lateinit var loadingIndicator: FrameLayout
     private lateinit var loadingStatus: TextView
     private lateinit var captureInProgressBorder: View
+    
+    private lateinit var arcoreSurfaceView: SurfaceView
+    private lateinit var arStatusText: TextView
 
-    private val cameraManager by lazy { getSystemService(Context.CAMERA_SERVICE) as CameraManager }
+    // Core Components
+    private lateinit var workflowManager: WorkflowManager
+    private lateinit var storageManager: InternalStorageManager
+    private lateinit var imuPacketizer: ImuPacketizer 
+    
+    // Role-Specific Components
+    private var dualCameraManager: DualCameraManager? = null // Node Only
+    private var anchorEngine: AnchorEngine? = null // Brain Only
+    
+    private var backgroundThread: HandlerThread? = null
+    private var backgroundHandler: Handler? = null
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
@@ -63,9 +82,9 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             if (role == "PRIMARY") {
                 if (ns.serviceRole.value == NetworkService.ServiceRole.IDLE) {
                     ns.registerService(0, "$currentProjectName-$cameraName")
-                } else {
-                    Log.d(tag, "Resuming existing Primary server session.")
                 }
+            } else if (role == "CLIENT") {
+                dualCameraManager = DualCameraManager(this@CaptureActivity, backgroundHandler!!, storageManager, ns.getSyncEngine(), this@CaptureActivity)
             }
             
             ns.setCameraName(cameraName)
@@ -73,10 +92,8 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         }
 
         override fun onServiceDisconnected(arg0: ComponentName) {
-            Log.e(tag, "Service disconnected")
             isBound = false
             networkService = null
-            Toast.makeText(this@CaptureActivity, "Network service connection lost", Toast.LENGTH_LONG).show()
             finish()
         }
     }
@@ -105,11 +122,23 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         loadingIndicator = findViewById(R.id.loadingIndicator)
         loadingStatus = findViewById(R.id.loadingStatus)
         captureInProgressBorder = findViewById(R.id.captureInProgressBorder)
+        arcoreSurfaceView = findViewById(R.id.arcoreSurfaceView)
+        arStatusText = findViewById(R.id.arStatusText)
 
         sharedPreferences = getSharedPreferences("RexrayVisionPrefs", Context.MODE_PRIVATE)
         
+        workflowManager = WorkflowManager(this)
+        storageManager = InternalStorageManager(this)
+        imuPacketizer = ImuPacketizer(this)
+        
         setupNewProject(newProject)
         generateCameraName(false)
+
+        if (role == "PRIMARY") {
+            anchorEngine = AnchorEngine(this)
+        }
+        
+        startBackgroundThread()
 
         if (savedInstanceState == null) {
             supportFragmentManager.beginTransaction()
@@ -126,6 +155,26 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
                     .commit()
             }
         }
+        
+        arcoreSurfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {}
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            override fun surfaceDestroyed(holder: SurfaceHolder) {}
+        })
+    }
+
+    private fun startBackgroundThread() {
+        backgroundThread = HandlerThread("CameraBackground").also { it.start() }
+        backgroundHandler = Handler(backgroundThread!!.looper)
+    }
+
+    private fun stopBackgroundThread() {
+        backgroundThread?.quitSafely()
+        try {
+            backgroundThread?.join()
+        } catch (e: InterruptedException) {
+            Log.e(tag, "Interrupted stopping background thread", e)
+        }
     }
 
     override fun onStart() {
@@ -140,14 +189,13 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
 
     override fun onStop() {
         super.onStop()
-        if (isBound) {
-            unbindService(connection)
-            isBound = false
-        }
-        if (isMigrationBound) {
-            unbindService(migrationServiceConnection)
-            isMigrationBound = false
-        }
+        if (isBound) unbindService(connection)
+        if (isMigrationBound) unbindService(migrationServiceConnection)
+        
+        dualCameraManager?.closeAll()
+        anchorEngine?.closeSession()
+        imuPacketizer.stopLogging()
+        stopBackgroundThread()
     }
 
     private fun observeNetworkState() {
@@ -157,39 +205,15 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             
             launch {
                 ns.isConnectedToPrimary.collect { isConnected ->
-                    if (role == "CLIENT" && !isConnected) {
-                        Log.w(tag, "Connection to Primary lost. Returning to setup.")
-                        runOnUiThread {
-                            Toast.makeText(this@CaptureActivity, "Server connection lost", Toast.LENGTH_SHORT).show()
-                            finish()
-                        }
-                    }
+                    if (role == "CLIENT" && !isConnected) finish()
                 }
             }
 
             launch {
-                combine(
-                    ns.iso,
-                    ns.shutterSpeed,
-                    ns.captureRate,
-                    ns.captureLimit,
-                    ns.projectName,
-                    ns.captureMode,
-                    ns.isFlashEnabled,
-                    ns.flashIntensity
-                ) { args ->
-                    MasterState(
-                        args[0] as Int,
-                        args[1] as Long,
-                        args[2] as Int,
-                        args[3] as Int,
-                        args[4] as String,
-                        args[5] as NetworkService.CaptureMode,
-                        args[6] as Boolean,
-                        args[7] as Int
-                    )
-                }.collectLatest { state ->
-                    currentProjectName = state.projectName
+                combine(ns.iso, ns.shutterSpeed, ns.projectName) { iso, shutter, project ->
+                    Triple(iso, shutter, project)
+                }.collectLatest { (_, _, project) ->
+                    currentProjectName = project
                     updatePreview()
                     runOnUiThread { updateUi() }
                 }
@@ -197,17 +221,39 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
 
             launch {
                 ns.isArmed.collect { armed ->
+                    if (armed) {
+                        workflowManager.transitionToArmed {
+                            (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.stopPreviewAndReleaseCamera()
+                            imuPacketizer.startHighFreqLogging()
+                            
+                            if (role == "PRIMARY") {
+                                runOnUiThread {
+                                    arcoreSurfaceView.visibility = View.VISIBLE
+                                    arStatusText.visibility = View.VISIBLE
+                                }
+                                anchorEngine?.initializeSession()
+                            } else if (role == "CLIENT") {
+                                val targets = getMappedPhysicalIds()
+                                dualCameraManager?.openAndSetupBurst(targets)
+                            }
+                        }
+                    } else {
+                        workflowManager.transitionToDisarmed {
+                            imuPacketizer.stopLogging()
+                            if (role == "PRIMARY") {
+                                runOnUiThread {
+                                    arcoreSurfaceView.visibility = View.GONE
+                                    arStatusText.visibility = View.GONE
+                                }
+                                anchorEngine?.closeSession()
+                            } else if (role == "CLIENT") {
+                                dualCameraManager?.closeAll()
+                            }
+                            (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.startPreview()
+                        }
+                    }
                     if (role == "PRIMARY") {
                         (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateArmingState(armed)
-                    }
-                }
-            }
-
-            launch {
-                ns.connectedClients.collect { clients ->
-                    if (role == "PRIMARY") {
-                        val names = clients.values.map { it.cameraName.ifEmpty { it.socket.inetAddress.hostAddress ?: "Unknown" } }
-                        (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.setClientList(names)
                     }
                 }
             }
@@ -220,17 +266,48 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
                         is NetworkService.Message.DisarmCapture -> onDisarmCapture(false)
                         is NetworkService.Message.StartCapture -> executeStartCapture(true)
                         is NetworkService.Message.StopCapture -> executeStopCapture(true)
-                        is NetworkService.Message.SyncTrigger -> {
-                            if (role == "PRIMARY") broadcastSettings()
-                        }
                         else -> {}
+                    }
+                }
+            }
+            
+            if (role == "PRIMARY") {
+                launch {
+                    ns.connectedClients.collect { clients ->
+                        val clientInfo = clients.values.map { 
+                            "${it.cameraName}: [${it.imageCount}/${getCaptureLimit()}] ${if(it.isArmed) "ARMED" else "WAITING"}"
+                        }
+                        runOnUiThread {
+                            (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.setClientList(clientInfo)
+                        }
+                    }
+                }
+
+                launch {
+                    while(true) {
+                        if (getIsArmed()) {
+                            val status = try { anchorEngine?.getTrackingStatus() ?: "OFF" } catch(e: Exception) { "ERROR" }
+                            runOnUiThread { arStatusText.text = "AR SCANNING: $status" }
+                        }
+                        delay(1000)
                     }
                 }
             }
         }
     }
 
-    data class MasterState(val iso: Int, val shutterSpeed: Long, val captureRate: Int, val captureLimit: Int, val projectName: String, val captureMode: NetworkService.CaptureMode, val isFlashEnabled: Boolean, val flashIntensity: Int)
+    private fun getMappedPhysicalIds(): List<Pair<String, String?>> {
+        val prefs = getSharedPreferences("HardwareMapping", Context.MODE_PRIVATE)
+        val mainOpenId = prefs.getString("main_open_id", null)
+        val mainPhysId = prefs.getString("main_phys_id", null)
+        val secOpenId = prefs.getString("secondary_open_id", null)
+        val secPhysId = prefs.getString("secondary_phys_id", null)
+        
+        val list = mutableListOf<Pair<String, String?>>()
+        mainOpenId?.let { list.add(Pair(it, mainPhysId)) }
+        secOpenId?.let { list.add(Pair(it, secPhysId)) }
+        return list
+    }
 
     private fun observeMigrationState() {
         migrationStateJob?.cancel()
@@ -239,68 +316,38 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
             service.isMigrating.combine(service.migrationProgress) { isMigrating, progress ->
                 isMigrating to progress
             }.collect { (isMigrating, progress) ->
-                val primaryFrag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment
-                val clientFrag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment
-                
                 if (role == "PRIMARY") {
-                    primaryFrag?.updateMigrationProgress(isMigrating, progress)
+                    (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateMigrationProgress(isMigrating, progress)
                 } else {
-                    clientFrag?.updateMigrationProgress(isMigrating, progress)
+                    (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment)?.updateMigrationProgress(isMigrating, progress)
+                }
+                
+                if (!isMigrating && progress == 100) {
+                    triggerOffloadWorker()
                 }
             }
         }
+    }
+
+    private fun triggerOffloadWorker() {
+        val workRequest = OneTimeWorkRequestBuilder<OffloadWorker>()
+            .setInputData(workDataOf("PROJECT_NAME" to currentProjectName))
+            .build()
+        WorkManager.getInstance(this).enqueue(workRequest)
     }
 
     fun startMigrationService() {
         val intent = Intent(this, FileMigrationService::class.java).apply {
             action = FileMigrationService.ACTION_START_MIGRATION
-            putExtra(FileMigrationService.EXTRA_CACHE_DIR, File(filesDir, "dng_cache").absolutePath)
+            putExtra(FileMigrationService.EXTRA_CACHE_DIR, storageManager.prepareStorageHandles().absolutePath)
         }
         startForegroundService(intent)
-        bindService(intent, migrationServiceConnection, Context.BIND_AUTO_CREATE)
     }
 
-    fun showLoading(message: String = "Processing...") {
-        runOnUiThread {
-            loadingStatus.text = message
-            loadingIndicator.visibility = View.VISIBLE
-        }
-    }
+    override fun onCameraReady() { updatePreview() }
 
-    fun hideLoading() {
-        runOnUiThread {
-            loadingIndicator.visibility = View.GONE
-        }
-    }
-
-    override fun onCameraReady() {
-        updatePreview()
-        runOnUiThread { 
-            val primaryFrag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment
-            val clientFrag = supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment
-            
-            primaryFrag?.onCameraReady() 
-            
-            val baseFrag = supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment
-            baseFrag?.let { bf ->
-                migrationTriggerJob?.cancel()
-                migrationTriggerJob = lifecycleScope.launch {
-                    bf.getImageSaver().activeTaskCount.collect { count ->
-                        if (bf.isAwaitingMigration()) {
-                            Log.d(tag, "IO_TRACING: Pending Disk Tasks: $count")
-                            primaryFrag?.updateDiskWriteProgress(count)
-                            clientFrag?.updateDiskWriteProgress(count)
-                            
-                            if (count == 0) {
-                                Log.i(tag, "IO_TRACING: ImageSaver idle. Handing off to FileMigrationService.")
-                                bf.markMigrationStarted()
-                                startMigrationService()
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    override fun onImageCaptured(data: ByteArray) {
+        onImageCaptured()
     }
 
     override fun onImageCaptured() {
@@ -312,8 +359,12 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         }
     }
 
-    override fun onCaptureLimitReached() {
-        onStopCapture()
+    override fun onCaptureLimitReached() { 
+        runOnUiThread { onStopCapture() } 
+    }
+
+    override fun onSessionConfigured(logicalId: String) {
+        Log.d(tag, "Node session configured: $logicalId")
     }
 
     private fun updateCaptureCounter() {
@@ -352,42 +403,20 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     }
 
     private fun setupNewProject(force: Boolean) {
-        var pName = if (force) null else sharedPreferences.getString("projectName", null)
-        if (pName == null) {
-            val adjectives = resources.getStringArray(R.array.adjectives)
-            val nouns = resources.getStringArray(R.array.nouns)
-            pName = "${adjectives.random()}-${nouns.random()}"
-            sharedPreferences.edit { putString("projectName", pName) }
-        }
-        currentProjectName = pName
-        networkService?.updateProjectName(pName)
+        val nm = NamingManager(sharedPreferences)
+        currentProjectName = nm.setupNewProject(force)
+        networkService?.updateProjectName(currentProjectName)
         sessionCaptureCount = 0
         updateCaptureCounter()
-        
-        if (force) {
-            clearCache()
-        }
-    }
-
-    private fun clearCache() {
-        val cacheDir = File(filesDir, "dng_cache")
-        if (cacheDir.exists()) {
-            cacheDir.listFiles()?.forEach { it.delete() }
-            Log.d(tag, "Cache cleared for new project.")
-        }
+        if (force) storageManager.clearBurstStorage()
     }
 
     private fun generateCameraName(force: Boolean) {
-        var aName = sharedPreferences.getString("cameraName", null)
-        if (aName == null || force) {
-            val animals = resources.getStringArray(R.array.animals)
-            aName = animals.random()
-            sharedPreferences.edit { putString("cameraName", aName) }
-        }
-        cameraName = aName
+        val nm = NamingManager(sharedPreferences)
+        cameraName = nm.generateCameraName(force)
     }
 
-    fun getProjectName(): String = networkService?.projectName?.value ?: currentProjectName
+    fun getProjectName(): String = currentProjectName
     fun getCameraName(): String = cameraName
     fun getIsArmed(): Boolean = networkService?.isArmed?.value ?: false
     fun getIso(): Int = networkService?.iso?.value ?: 400
@@ -399,62 +428,24 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
     fun getFlashIntensity(): Int = networkService?.flashIntensity?.value ?: 3
     fun getDngWriterThreads(): Int = dngWriterThreads
 
-    override fun setIso(value: Int) {
-        networkService?.updateIso(value)
-        sharedPreferences.edit { putInt("iso", value) }
-        broadcastSettings()
-    }
-
-    override fun setShutterSpeed(value: Long) {
-        networkService?.updateShutterSpeed(value)
-        sharedPreferences.edit { putLong("shutterSpeed", value) }
-        broadcastSettings()
-    }
-
-    override fun setCaptureRate(value: Int) {
-        networkService?.updateCaptureRate(value)
-        sharedPreferences.edit { putInt("captureRate", value) }
-        broadcastSettings()
-    }
-
-    override fun setCaptureLimit(value: Int) {
-        networkService?.updateCaptureLimit(value)
-        sharedPreferences.edit { putInt("captureLimit", value) }
-        broadcastSettings()
-    }
-
-    override fun setCaptureMode(value: NetworkService.CaptureMode) {
-        networkService?.updateCaptureMode(value)
-        sharedPreferences.edit { putString("captureMode", value.name) }
-        broadcastSettings()
-    }
-
-    override fun setFlashEnabled(value: Boolean) {
-        networkService?.updateFlashEnabled(value)
-        sharedPreferences.edit { putBoolean("isFlashEnabled", value) }
-        broadcastSettings()
-    }
-
-    override fun setFlashIntensity(value: Int) {
-        networkService?.updateFlashIntensity(value)
-        sharedPreferences.edit { putInt("flashIntensity", value) }
-        broadcastSettings()
-    }
+    override fun setIso(value: Int) { networkService?.updateIso(value); broadcastSettings() }
+    override fun setShutterSpeed(value: Long) { networkService?.updateShutterSpeed(value); broadcastSettings() }
+    override fun setCaptureRate(value: Int) { networkService?.updateCaptureRate(value); broadcastSettings() }
+    override fun setCaptureLimit(value: Int) { networkService?.updateCaptureLimit(value); broadcastSettings() }
+    override fun setCaptureMode(value: NetworkService.CaptureMode) { networkService?.updateCaptureMode(value); broadcastSettings() }
+    override fun setFlashEnabled(value: Boolean) { networkService?.updateFlashEnabled(value); broadcastSettings() }
+    override fun setFlashIntensity(value: Int) { networkService?.updateFlashIntensity(value); broadcastSettings() }
 
     fun broadcastSettings() {
         if (role == "PRIMARY") {
             val ns = networkService ?: return
-            val commandId = UUID.randomUUID().toString()
             ns.broadcastMessage(NetworkService.Message.SetParams(
-                ns.shutterSpeed.value, ns.iso.value, ns.captureRate.value, ns.captureLimit.value, ns.projectName.value, ns.captureMode.value, ns.isFlashEnabled.value, ns.flashIntensity.value, commandId
+                ns.shutterSpeed.value, ns.iso.value, ns.captureRate.value, ns.captureLimit.value, ns.projectName.value, ns.captureMode.value, ns.isFlashEnabled.value, ns.flashIntensity.value, UUID.randomUUID().toString()
             ))
         }
     }
 
-    override fun onNewProject() {
-        setupNewProject(true)
-        broadcastSettings()
-    }
+    override fun onNewProject() { setupNewProject(true); broadcastSettings() }
 
     override fun onArmCapture(broadcast: Boolean) {
         networkService?.updateArmingStatus(true)
@@ -468,80 +459,118 @@ class CaptureActivity : AppCompatActivity(), BaseCaptureFragment.CameraFragmentL
         if (broadcast) networkService?.broadcastMessage(NetworkService.Message.DisarmCapture(UUID.randomUUID().toString()))
     }
 
-    override fun onStartCapture() {
-        executeStartCapture(false)
-    }
-
-    override fun onStopCapture() {
-        executeStopCapture(false)
-    }
+    override fun onStartCapture() { executeStartCapture(false) }
+    override fun onStopCapture() { executeStopCapture(false) }
 
     private fun executeStartCapture(isNetworkTriggered: Boolean) {
         if (getIsArmed() || isNetworkTriggered) {
+            sessionCaptureCount = 0
+            updateCaptureCounter()
+            
             runOnUiThread { 
                 captureInProgressBorder.visibility = View.VISIBLE 
-                sessionCaptureCount = 0
-                updateCaptureCounter()
                 if (role == "PRIMARY") {
                     (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureState(true)
-                } else {
-                    (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment)?.updateCaptureState(true)
                 }
             }
-            if (role == "PRIMARY" && !isNetworkTriggered) {
-                networkService?.broadcastMessage(NetworkService.Message.StartCapture(UUID.randomUUID().toString()))
+
+            // Start Safety Timeout
+            captureSafetyJob?.cancel()
+            captureSafetyJob = lifecycleScope.launch {
+                val expectedSeconds = (getCaptureLimit() / getCaptureRate())
+                val safetyBuffer = 3000L // 3 seconds grace
+                delay((expectedSeconds * 1000L) + safetyBuffer)
+                Log.w(tag, "Capture safety timeout reached. Aborting capture.")
+                executeStopCapture(false)
             }
-            (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.startBurstCapture(getIso(), getShutterSpeed(), getCaptureRate(), getCaptureLimit())
+
+            if (role == "PRIMARY") {
+                if (!isNetworkTriggered) {
+                    networkService?.broadcastMessage(NetworkService.Message.StartCapture(UUID.randomUUID().toString()))
+                }
+                (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.startBurstCapture(
+                    getIso(), getShutterSpeed(), getCaptureRate(), getCaptureLimit()
+                )
+            } else if (role == "CLIENT") {
+                dualCameraManager?.startBurst(getCaptureLimit())
+            }
         }
     }
 
     private fun executeStopCapture(isNetworkTriggered: Boolean) {
+        captureSafetyJob?.cancel()
+        
         runOnUiThread { 
             captureInProgressBorder.visibility = View.GONE 
             if (role == "PRIMARY") {
                 (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureState(false)
-                if (!isNetworkTriggered) onDisarmCapture(true)
-            } else {
-                (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? ClientControlsFragment)?.updateCaptureState(false)
+            }
+            showLoading("Processing metadata...")
+        }
+        
+        lifecycleScope.launch {
+            if (role == "PRIMARY") {
+                if (!isNetworkTriggered) {
+                    networkService?.broadcastMessage(NetworkService.Message.StopCapture(UUID.randomUUID().toString()))
+                }
+                (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.stopBurstCapture()
+
+                imuPacketizer.exportToCsv(currentProjectName)
+                anchorEngine?.exportPointCloudToPly(currentProjectName)
+                startMigrationService()
+                onDisarmCapture(true)
+            } else if (role == "CLIENT") {
+                dualCameraManager?.stopBurst()
+                imuPacketizer.exportToCsv(currentProjectName)
+                generateXmpSidecars()
+                startMigrationService()
+            }
+            runOnUiThread { hideLoading() }
+        }
+    }
+
+    private fun generateXmpSidecars() {
+        val dir = storageManager.prepareStorageHandles()
+        val files = dir.listFiles { f -> f.extension.lowercase() == "jpg" } ?: return
+        val packer = MetadataPacker()
+        val offset = networkService?.getSyncEngine()?.getOffsetNanos() ?: 0L
+        
+        files.forEach { file ->
+            val parts = file.nameWithoutExtension.split("_")
+            if (parts.size >= 2) {
+                val sensorTs = parts[1].toLongOrNull() ?: 0L
+                val brainTs = sensorTs + offset
+                val imuSample = imuPacketizer.getClosestSample(sensorTs)
+                packer.writeXmpSidecar(file, brainTs, imuSample)
             }
         }
-        if (role == "PRIMARY" && !isNetworkTriggered) {
-            networkService?.broadcastMessage(NetworkService.Message.StopCapture(UUID.randomUUID().toString()))
+    }
+
+    fun showLoading(message: String) {
+        runOnUiThread {
+            loadingStatus.text = message
+            loadingIndicator.visibility = View.VISIBLE
         }
-        (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.stopBurstCapture()
+    }
+
+    fun hideLoading() {
+        runOnUiThread { loadingIndicator.visibility = View.GONE }
     }
 
     override fun onAnalyzeScene() {
         (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.toggleAutoIso()
     }
-
-    override fun onStopServer() {
-        showLoading("Shutting down server...")
-        if (role == "PRIMARY") {
-            networkService?.unregisterService()
-        }
-        finish()
+    override fun onStopServer() { 
+        networkService?.unregisterService()
+        finish() 
     }
-
-    override fun onRegenerateCameraName() {
-        generateCameraName(true)
-        broadcastSettings()
+    override fun onRegenerateCameraName() { generateCameraName(true); broadcastSettings() }
+    override fun onCloseApp() { 
+        stopService(Intent(this, NetworkService::class.java))
+        finishAffinity() 
     }
-    
-    override fun onCloseApp() {
-        if (role == "PRIMARY") {
-            onStopServer()
-        } else {
-            onLeaveServer()
-        }
-        finishAffinity()
-    }
-
-    override fun onLeaveServer() {
-        showLoading("Disconnecting from server...")
-        if (role == "CLIENT") {
-            networkService?.disconnectFromPrimary()
-        }
-        finish()
+    override fun onLeaveServer() { 
+        networkService?.disconnectFromPrimary()
+        finish() 
     }
 }

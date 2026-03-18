@@ -1,159 +1,17 @@
 # Completed Work
 
-- [x] **Task 1: Fix Initialization Order (Critical)**
-    - **Goal:** Resolve the `UninitializedPropertyAccessException` crash on startup.
-    - **Analysis:** The `byteBufferPool`, `imageSaver`, and `captureStateHandler` are being initialized in `onStart()`, but they depend on camera characteristics that are only available in the `onOpened()` callback of the `cameraStateCallback`.
-    - **Action:** Moved the initialization of these three classes to the `onOpened()` callback, ensuring they are only created after the camera is open and their dependencies are available.
-- [x] Refactor application startup flow to be client-first and eliminate network race conditions.
-  - [x] Modify `MainActivity` to be a role-selector (Primary/Client).
-  - [x] Update `activity_main.xml` with role selection UI.
-  - [x] Remove role-switching logic from `CaptureActivity` and `SetupActivity`.
-- [x] **Implement Discovery-First, Fragment-Based Architecture**
-  - [x] **Phase 1: Establish "Discovery Screen" as the App's Core**
-    - [x] Promote `SetupActivity` to `LAUNCHER` in `AndroidManifest.xml`.
-    - [x] Refactor `activity_setup.xml` to include "Refresh" and "Become a Server" buttons.
-    - [x] Refactor `SetupActivity.kt` to handle navigation to `CaptureActivity` for both Client and Primary roles.
-  - [x] **Phase 2: Deconstruct `CaptureActivity` into Fragments**
-    - [x] Create `BaseCaptureFragment.kt` for core camera functionality.
-    - [x] Create `PrimaryControlsFragment.kt` for server UI.
-    - [x] Create `ClientControlsFragment.kt` for client UI.
-    - [x] Refactor `activity_capture.xml` to use `FragmentContainerView`.
-    - [x] Refactor `CaptureActivity.kt` to be a fragment container and coordinator.
-  - [x] **Phase 3: Implement Navigation Back to Discovery Hub**
-    - [x] Implement "Stop Server" logic in `PrimaryControlsFragment` to return to `SetupActivity`.
-    - [x] Implement "Leave Server" logic in `ClientControlsFragment` to return to `SetupActivity`.
-- [x] **Fix Server Mode Crash and Analysis Loop**
-  - [x] **Part 1: Fix `ArrayIndexOutOfBoundsException` in `PrimaryControlsFragment`**
-    - [x] Refactor `shutterSpeeds` and `captureLimits` arrays in `PrimaryControlsFragment.kt` to be class properties.
-    - [x] Synchronize `SeekBar` max values with the size of the data arrays.
-  - [x] **Part 2: Fix Runaway Auto-ISO Analysis Loop in `BaseCaptureFragment`**
-    - [x] Remove recursive `analyzeScene(true)` call from `handleAnalysis` in `BaseCaptureFragment.kt`.
-- [x] **Fix UI State and Layout**
-  - [x] **Part 1: Fix UI State Synchronization**
-    - [x] In `CaptureActivity.kt`, modify `setIso`, `setShutterSpeed`, `setCaptureRate`, and `setCaptureLimit` to call `updatePreview()` and `updateUi()` on the appropriate fragments to ensure the UI state is synchronized.
-  - [x] **Part 2: Fix Layout and Button Positioning**
-    - [x] Add `ViewCompat.setOnApplyWindowInsetsListener` to `PrimaryControlsFragment.kt` to prevent UI elements from being obscured by system navigation.
-    - [x] Add `ViewCompat.setOnApplyWindowInsetsListener` to `ClientControlsFragment.kt` to correct button positioning.
-- [x] **Fix Crash, UI State, and Layout**
-  - [x] **Part 1: Fix `CalledFromWrongThreadException` Crash**
-    - [x] Wrap the call to `updateUi()` in `CaptureActivity.kt`'s `setIso` method with `runOnUiThread`.
-  - [x] **Part 2: Correct `SeekBar` Ranges and Defaults**
-    - [x] Update `loadSettings()` in `CaptureActivity.kt` with the correct default values.
-    - [x] Update `PrimaryControlsFragment.kt` with the correct `min`, `max`, and listener logic for ISO, Shutter Speed, and FPS `SeekBar`s.
-- [x] **Fix SeekBar Ranges and Arming Logic**
-  - [x] **Part 1: Correct `SeekBar` Ranges and Defaults**
-    - [x] Update `loadSettings()` in `CaptureActivity.kt` with correct default values (ISO 400, Shutter 1/300s, FPS 5).
-    - [x] Update `PrimaryControlsFragment.kt` with correct `min`/`max` ranges for ISO (50-1000), Shutter Speed (200-1200), and FPS (3-15).
-  - [x] **Part 2: Implement Correct Arming Logic**
-    - [x] Add `isArmed` state property to `CaptureActivity.kt`.
-    - [x] Update `onArmCapture`/`onDisarmCapture` in `CaptureActivity` to set the `isArmed` state.
-    - [x] Add logic to `PrimaryControlsFragment` to enable/disable the capture button based on the `isArmed` state.
-- [x] **Fix Default Settings and Auto-ISO on Startup**
-  - [x] **Part 1: Defer Auto-ISO Analysis**
-    - [x] Remove automatic `analyzeScene()` trigger from `BaseCaptureFragment.kt`.
-  - [x] **Part 2: Correct `SeekBar` Ranges and Defaults**
-    - [x] Update `loadSettings()` in `CaptureActivity.kt` with correct default values (ISO 400, Shutter 1/300s, FPS 5).
-    - [x] Update `PrimaryControlsFragment.kt` with correct `min`/`max` ranges for ISO (50-1000), Shutter Speed (200-1200), and FPS (3-15).
-- [x] **Investigate and Fix Default Settings Override**
-    - [x] **Step 1: Code Analysis.** Review `CaptureActivity.kt` and any related settings management classes to understand how and where `iso` and `shutterSpeed` values are initialized, loaded from storage (likely SharedPreferences), and applied to the camera.
-    - [x] **Step 2: Trace Data Flow.** Add targeted logging to track the values of `iso` and `shutterSpeed` from their initial declaration to the point they are used to configure the `CaptureRequest`.
-    - [x] **Step 3: Pinpoint Override.** Analyze the logs from a fresh run to identify the exact location in the code where the intended defaults (ISO 400, ~1/300s) are replaced by the incorrect loaded values (ISO 153, ~1/450s).
-    - [x] **Step 4: Implement and Verify Fix.** Modify the settings logic to ensure that the correct defaults are applied when no valid user settings are present. This may involve correcting the default value source or adjusting the logic that reads from SharedPreferences. After implementation, verify the fix by checking logcat for the correct initial settings.
-- [x] **Task 1: Implement Global Asynchronous Task Indicator**
-    - [x] **Part 1: UI Components.**
-        - [x] Add a `FrameLayout`-based loading indicator (with a `ProgressBar` and `TextView`) to `activity_setup.xml`.
-        - [x] Add the same loading indicator to `activity_capture.xml`.
-    - [x] **Part 2: Control Logic.**
-        - [x] In `SetupActivity.kt`, add `showLoading(message: String)` and `hideLoading()` functions to control the indicator.
-        - [x] In `CaptureActivity.kt`, add `showLoading(message: String)` and `hideLoading()` functions to control its indicator.
-    - [x] **Part 3: Integration.**
-        - [x] In `SetupActivity.kt`, wrap the `startDiscovery()` and server connection logic with `showLoading`/`hideLoading`.
-        - [x] In `CaptureActivity.kt`, wrap `onAnalyzeScene()`, `onStopServer()`, and `onLeaveServer()` with the loading indicator. The corresponding `hideLoading()` will be called when the async operation (e.g., analysis) completes.
+- [x] **ARCore SLAM Stability (Phase 1)**
+    - **Fix `AR_ERROR_MISSING_GL_CONTEXT`**: Implemented a minimal off-screen EGL context in `AnchorEngine.kt` to ensure `session.update()` has a current GL context during background tracking.
+    - **Graceful Tracking Status**: Added robust error handling in `AnchorEngine.kt` to prevent crashes and provide "OFFLINE" or "ERROR" status when SLAM is inactive.
 
-- [x] **Task 2: Implement Graceful Shutdown and Add "Close App" Button**
-    - [x] **Part 1: Fix Camera Closing Race Condition.**
-        - [x] In `BaseCaptureFragment.kt`, modify the `closeCamera()` function to use a `Semaphore` to block the calling thread until the `CameraDevice.StateCallback#onClosed` callback has been received. This will prevent the `Handler`'s thread from being torn down prematurely, fixing the `IllegalStateException` on exit.
-    - [x] **Part 2: Add UI Button.**
-        - [x] Add a "Close App" button to the layout of `activity_setup.xml`.
-        - [x] Add a "Close App" button to the layout of `activity_capture.xml`.
-    - [x] **Part 3: Implement Shutdown Logic.**
-        - [x] In `SetupActivity.kt`, the button's listener will call `finishAffinity()`.
-        - [x] In `CaptureActivity.kt`, the button's listener will call the appropriate cleanup functions (`onStopServer()` or `onLeaveServer()`) before calling `finishAffinity()`.
-- [x] **Fix Stuck Loading Indicators**
-    - [x] **Part 1: Fix Discovery Timeout.** In `SetupActivity.kt`, modify `observeDiscoveredServices` to ignore the initial `StateFlow` emission and ensure `hideLoading()` is called reliably on both success and timeout.
-    - [x] **Part 2: Fix Analysis Failure.** In `BaseCaptureFragment.kt`, ensure `hideLoading()` is called when the auto-ISO analysis fails to prevent a stuck indicator.
-- [x] **Task 1: Refactor Network Service for Asynchronous Discovery**
-    - [x] **Part 1: Make Service Asynchronous.** In `NetworkService.kt`, modify the `discoverServices()` method to run on a background thread (`Dispatchers.IO`) that the service itself manages. The results will be published to the existing `discoveredServices` `StateFlow`.
-    - [x] **Part 2: Update UI Layer.** In `SetupActivity.kt`, remove all `showLoading`/`hideLoading` calls associated with network discovery. The UI will now update reactively based on the `StateFlow` without a blocking spinner.
-    - [x] **Part 3: Remove UI Spinner.** In `activity_setup.xml`, remove the `loadingIndicator` `FrameLayout` entirely, as it is no longer needed for discovery.
-- [x] **Task 2: Fix Capture Screen Layout**
-    - [x] **Part 1: Adjust Button Constraints.** In `activity_capture.xml`, reposition the "Close App" button to the top-left corner of the screen to ensure it does not overlap with any other UI elements or the system navigation bar.
-- [x] **Task 1: Implement Standardized Layered Layout Architecture**
-    - [x] **Part 1: Refactor Capture Screen Layers.** In `activity_capture.xml`, ensure the root layout is a `RelativeLayout` to allow for z-axis layering. The `baseCaptureFragmentContainer` will serve as the bottom "Background Layer," the `controlsFragmentContainer` will be the "Main Layer," and the `loadingIndicator` and `closeAppButton` will occupy the top "Popup Layer."
-    - [x] **Part 2: Relocate Histogram.** In `fragment_base_capture.xml`, move the `HistogramView` to the top-left corner to establish a consistent, non-overlapping location for it.
-    - [x] **Part 3: Refactor Controls to Respect Layers.** In `fragment_primary_controls.xml`, use a `ConstraintLayout` to position the client list view in a dedicated area (e.g., bottom-left) that does not conflict with the histogram's new fixed position.
-- [x] **Task 1: Fix Overlapping UI Layout**
-    - [x] **Part 1: Re-architect Primary Controls.** Redesign `fragment_primary_controls.xml` from the ground up using a `ConstraintLayout` and strict guidelines to create non-overlapping zones for the client list, settings panel, status displays, and action buttons.
-    - [x] **Part 2: Verify Container Integrity.** Confirm that the parent `activity_capture.xml` and the background `fragment_base_capture.xml` are correctly configured to support the newly segmented layout, ensuring clear separation of UI layers.
-- [x] **Task 1: Re-architect Screen Layout with Segmented Containers**
-    - [x] **Part 1: Redesign Primary Controls Layout.** In `fragment_primary_controls.xml`, use `ConstraintLayout` with clear guidelines to partition the screen into five distinct zones: top-left (for Client List), top-right (for Settings), bottom-left (for Status), bottom-right (for Info), and a central bottom area for primary action buttons. This will enforce strict boundaries and prevent any UI element overlap.
-    - [x] **Part 2: Verify Container Integrity.** Confirm that the parent `activity_capture.xml` and the background `fragment_base_capture.xml` are correctly configured to support the new segmented layout, with `baseCaptureFragmentContainer` as the background and `controlsFragmentContainer` as the main interactive layer.
-- [x] **Fix `NullPointerException` in `PrimaryControlsFragment`**
-    - [x] **Part 1: Remove Erroneous View References.** In `PrimaryControlsFragment.kt`, remove all references to views that were deleted from the XML layout to resolve the `NullPointerException`.
-    - [x] **Part 2: Build Verification.** Confirm that the project builds successfully after the fix.
-- [x] **Analyze `activity_capture.xml`:** Read the file to understand the current container structure and locate the definitions for both the `PrimaryControlsFragment` container and the `closeAppButton`.
-- [x] **Relocate Histogram:** Identify the histogram `View` in the `baseCaptureFragment` layout and move it to the `activity_capture.xml` layout.
-- [x] **Consolidate UI into a Single Layer:** Modify `activity_capture.xml` to have a single `ConstraintLayout` for Layer 2. This layout will contain the `FragmentContainerView` for the `PrimaryControlsFragment`, the relocated histogram, and any other stray UI elements like the `closeAppButton`.
-- [x] **Enforce Transparency:** Set the background of this unified Layer 2 `ConstraintLayout` to be transparent, allowing the camera preview from Layer 1 to be visible.
-- [x] **Re-Constrain All Elements:** Within the unified Layer 2, use `Guideline`s to define the designated zones for each control group. Apply a complete and logical set of constraints to every element—the fragment container, the buttons, the histogram, and the text views—tying them to these guidelines and to each other to prevent any possibility of overlap.
-- [x] **Define New Layout Structure:** Re-architect `fragment_primary_controls.xml` with new horizontal and vertical `Guideline`s to establish the `top`, `middle`, and `hot` segments as shown in the diagram.
-- [x] **Relocate and Constrain UI Elements:** Move each UI component to its new designated area and apply a complete set of constraints to bind it to the new guidelines and surrounding elements, ensuring no overlaps.
-- [x] **Consolidate Controls:** Group the `analyzeSceneButton` with the settings sliders and use the `settingsDisplayTextView` as the "exposure info" panel.
-- [x] **Build and Verify:** Initiate a build to verify the integrity of the new layout.
-- [x] **Re-architect Layout with Correct Column Structure:**
-    - [x] Modify `fragment_primary_controls.xml` to implement the specified multi-column layout.
-    - [x] Add new vertical `Guideline`s to create a three-column structure for the `middle segment`.
-- [x] **Restore and Relocate All UI Elements:**
-    - [x] Add the `projectNameTextView` and `cameraNameTextView` back into the layout, placing them in the top-left quadrant of the `hot segment`.
-    - [x] Move all other UI elements to their correct positions within the new grid structure as defined by the layout diagram.
-- [x] **Correct View Sizing:**
-    - [x] Modify all `Button` elements to use `wrap_content` for their `layout_width` and `layout_height`.
-    - [x] Apply constraints to center the buttons and other controls within their designated grid cells rather than stretching them.
-- [x] **Verify Code and Layout:**
-    - [x] Update `PrimaryControlsFragment.kt` to ensure all view references are correctly initialized.
-    - [x] Initiate a build to verify the integrity and correctness of the final layout.
-- [x] **Correct Layout Based on New Feedback:**
-    - [x] Re-architect `fragment_primary_controls.xml` to match the new visual specification.
-- [x] **Adjust Middle Segment:**
-    - [x] Modify constraints for `settingsDisplayTextView` (the "exposure info" panel) to anchor it to the *bottom* of the middle column, and set its height to `wrap_content` leaving the area above it empty.
-- [x] **Restore Bottom (Bot) Segment Views:**
-    - [x] Re-introduce the `projectNameTextView` and `cameraNameTextView` into a `LinearLayout` container.
-    - [x] Place this container in the top-left quadrant of the "bot" segment (above the `newProjectButton`).
-    - [x] Adjust the constraints for `newProjectButton`, `armButton`, and `captureButton` to occupy the four distinct cells of the "bot" segment correctly.
-- [x] **Verify Layout and Build:**
-    - [x] Ensure all `Button` views have `wrap_content` for size and are centered within their cells.
-    - [x] Initiate a build to confirm the layout is correct and the project compiles.
-- [x] **Create Style Drawables:**
-    *   Create a `rounded_black_bg.xml` for container backgrounds with rounded corners.
-- [x] **Update String Resources:**
-    *   Update the `connected_clients` string to "Client List".
-- [x] **Refactor `PrimaryControlsFragment.kt`:**
-    *   In the `updateUi` method, use formatted string resources to set the project and camera name text.
-- [x] **Re-architect `fragment_primary_controls.xml`:**
-    *   **Apply Styles:** Apply the new drawable to all relevant containers.
-    *   **Add Padding:** Add an 8dp margin to all segment containers for visual separation.
-    *   **Correct Placement:** Adjust constraints to correctly place the "exposure info" panel at the bottom of its cell and restore the project/camera name views to their designated location.
-- [x] **Verify and Build:**
-    *   Initiate a final build to confirm the layout is correct and the project compiles.
-- [x] **File Analysis:** Examine `CaptureActivity.kt` and `activity_capture.xml` to identify the optimal locations for adding the capture counter and the visual indicator for capture-in-progress.
-- [x] **UI Modification:** In `activity_capture.xml`, introduce a `TextView` for the capture count and a `View` to serve as a border, which will be hidden by default.
-- [x] **Logic Implementation:**
-    *   In `CaptureActivity.kt`, on startup, calculate the total number of existing DNG files in the app's public directory, filtering by the current project name, to correctly initialize the counter.
-    *   Update the `ImageSaver.OnImageSavedListener` to increment the counter and update the UI each time a new image is saved.
-    *   Implement logic to make the green border visible when a capture begins and hide it upon completion.
-- [x] **State Management:** A new `sessionCaptureCount` property will be added to `CaptureActivity.kt`. This counter will be initialized to zero when the activity is created and reset every time the "New Project" button is pressed.
-- [x] **Callback Simplification:** The existing file-based and batching callbacks (`onImageSaved`, `onImagesSaved`) will be removed. They will be replaced by a single, simple `onImageCaptured()` callback.
-- [x] **Signal Generation:** `BaseCaptureFragment.kt` will be modified to call this new `onImageCaptured()` listener each time a single image is successfully captured and passed to the image saver.
-- [x] **UI Update:** In `CaptureActivity.kt`, the implementation of `onImageCaptured()` will simply increment the `sessionCaptureCount` and update the on-screen `TextView`.
-- [x] **Code Removal:** All previous code related to file system scanning (`updateCaptureCounter`) and complex `ImageSaver` listeners will be removed to eliminate the performance bottleneck.
-- [x] **Fix Crash on Startup:** Resolve the `UninitializedPropertyAccessException` in `CaptureActivity.kt` by reordering the method calls in the `onCreate` function to ensure all UI elements are initialized before they are accessed.
+- [x] **Server-Client Communication (Phase 2)**
+    - **Local Command Loopback**: Modified `NetworkService.kt` to emit broadcasted messages back to the local `incomingMessages` flow. This ensures the Primary node triggers its own capture and arming logic in sync with the swarm.
+    - **Enhanced Handshake Logging**: Added explicit "HANDSHAKE SUCCESS" logs in `RexrayServer.kt` to confirm client connections.
+
+- [x] **Capture Logic & UI (Phase 3)**
+    - **Primary Node Capture Trigger**: Updated `CaptureActivity.kt` to explicitly start the `BaseCaptureFragment` burst when a `StartCapture` message is received (either via loopback or network).
+    - **UI Capture State Sync**: Synchronized the "Capture/Stop" button state and the "Green Border" visibility in `CaptureActivity.kt` and `PrimaryControlsFragment.kt`.
+    - **Capture Safety Timeout**: Implemented a watchdog timer in `CaptureActivity.kt` that automatically stops and resets the capture state if it exceeds the expected duration (plus a buffer).
+    - **Swarm Visibility**: Updated `CaptureActivity.kt` to observe the `connectedClients` flow and display per-client status (camera name, image count, arming state) in the Primary UI.
+
+... (Previous completed work remains below) ...

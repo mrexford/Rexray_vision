@@ -25,6 +25,7 @@ class SetupActivity : AppCompatActivity() {
     private lateinit var refreshButton: Button
     private lateinit var becomeServerButton: Button
     private lateinit var closeAppButton: Button
+    private lateinit var testingButton: Button
     private lateinit var serviceListView: ListView
     private lateinit var serviceListAdapter: ArrayAdapter<String>
 
@@ -61,6 +62,7 @@ class SetupActivity : AppCompatActivity() {
         refreshButton = findViewById(R.id.refreshButton)
         becomeServerButton = findViewById(R.id.becomeServerButton)
         closeAppButton = findViewById(R.id.closeAppButton)
+        testingButton = findViewById(R.id.testingButton)
         serviceListView = findViewById(R.id.serviceListView)
 
         serviceListAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf<String>())
@@ -80,7 +82,13 @@ class SetupActivity : AppCompatActivity() {
             startActivity(intent)
         }
 
+        testingButton.setOnClickListener {
+            val intent = Intent(this, TestingActivity::class.java)
+            startActivity(intent)
+        }
+
         closeAppButton.setOnClickListener {
+            stopService(Intent(this, NetworkService::class.java))
             finishAffinity()
         }
 
@@ -99,6 +107,14 @@ class SetupActivity : AppCompatActivity() {
         Intent(this, NetworkService::class.java).also { intent ->
             startService(intent)
             bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isBound) {
+            unbindService(connection)
+            isBound = false
         }
     }
 

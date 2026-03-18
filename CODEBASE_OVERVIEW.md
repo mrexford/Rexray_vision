@@ -6,24 +6,31 @@ This document provides a high-level overview of the Rexray Vision application's 
 
 The project is a standard Android application with a single `:app` module.
 
-## Core Components
+## Core Swarm Components
 
-*   **`SetupActivity`**: **The Primary Entry Point.** Allows the user to select the device's role: Primary or Client. It handles the initial project creation, network discovery, and connection setup.
-*   **`CaptureActivity`**: The main screen for the capture phase, responsible for managing fragments and synchronizing UI with the `NetworkService`.
-*   **`BaseCaptureFragment`**: A fragment that encapsulates core camera hardware logic, including session management and image capture. It is designed to be lifecycle-aware, releasing camera hardware when backgrounded.
-*   **`RexrayCameraManager`**: A class that wraps the Camera2 API, simplifying camera setup and configuration.
-*   **`CameraSessionManager`**: Manages the `CameraCaptureSession` and handles capture requests.
-*   **`CaptureStateHandler`**: Manages the state of image capture, including pending buffers and results. Its buffer handling is designed to correctly handle row-stride in image data to prevent crashes.
-*   **`ImageSaver`**: A background component that saves captured RAW images to the app's internal cache as DNG files.
-*   **`FileMigrationService`**: A foreground service responsible for moving saved DNG files from internal cache to public storage.
-*   **`NetworkService`**: **The System Source of Truth.** A persistent foreground service that maintains the network server (Primary) or client connection (Client) and holds the global session state (Armed status, ISO, Shutter Speed, etc.). It persists across Activity backgrounding.
-    *   **`RexrayServer`**: (Internal to Service) Handles the TCP server socket, client connections, and broadcasting.
-    *   **`RexrayClient`**: (Internal to Service) Handles the client socket and incoming message listening.
-*   **`ExposureAnalysisStrategy`**: An interface for different exposure analysis algorithms.
-*   **`ByteBufferPool`**: A utility class for pooling and reusing `ByteBuffer`s.
+*   **`NetworkService`**: **The System Source of Truth.** A persistent foreground service maintaining the PTP-like synchronization master/node status and global session parameters.
+    *   **`TimeSyncEngine`**: Calculates microsecond-level clock offsets between Brain and Nodes.
+    *   **`NetworkTimeProvider`**: UDP-based synchronization engine for RTT compensation.
+*   **`CaptureActivity`**: The central coordinator for the "Calibration Flip". It manages the transition between setup and high-speed capture.
+*   **`WorkflowManager`**: Implements the state machine for `ARMED` and `DISARMED` system states.
+*   **`DualCameraManager`**: A high-performance engine for simultaneous physical camera capture, bypassing the standard Android camera preview pipeline for microsecond precision.
+*   **`InternalStorageManager`**: Manages low-latency I/O to the app's internal filesystem to avoid `MediaStore` thumbnailing overhead during burst capture.
+*   **`AnchorEngine`**: ARCore-based engine for establishing spatial anchors and exporting point clouds in `.ply` format.
+*   **`ImuPacketizer`**: High-frequency (200Hz+) inertial sensor logger for temporal sensor fusion.
+*   **`MetadataPacker`**: Injects PTP-synchronized timestamps into JPEG EXIF `UserComment` headers.
+*   **`OffloadWorker`**: A background task that packages images, IMU data, and spatial point clouds into a single session ZIP for offloading.
+
+## Legacy & Setup Components
+
+*   **`SetupActivity`**: Handles network discovery and role selection (Primary/Client).
+*   **`BaseCaptureFragment`**: Used for the "Disarmed" state viewfinder and initial parameter adjustment.
+*   **`RexrayCameraManager` / `CameraSessionManager`**: Wrappers for the Camera2 API used during the setup phase.
+*   **`ImageSaver`**: Background component for saving RAW/JPEG images during standard capture.
+*   **`FileMigrationService`**: A foreground service that moves captured data from internal storage to public storage post-session.
 
 ## Architectural Patterns
 
-*   **Service-Centric State**: The `NetworkService` acts as the master authority for the capture session. Activities and Fragments observe `StateFlow`s from the service to remain synchronized.
-*   **Producer-Consumer**: The `BaseCaptureFragment` produces image data; `ImageSaver` consumes it.
-*   **Lifecycle-Aware Hardware**: Hardware resources (Camera) are released during backgrounding to ensure system stability, while network resources (Sockets) are maintained by the foreground service.
+*   **Calibration Flip**: The system explicitly tears down setup camera sessions to free up ISP bandwidth for ARCore and high-speed multi-lens capture during the "Armed" phase.
+*   **Monotonic Timing Backbone**: All sensor data (Camera, IMU, ARCore) is indexed using a shared monotonic clock synchronized via UDP to the Primary device.
+*   **I/O Isolation**: Using internal storage during capture and deferred migration to `MediaStore` ensures zero dropped frames at 15fps+ dual-streaming.
+*   **Service-Authoritative State**: The `NetworkService` remains the master authority for session state, persisting across UI lifecycle changes.

@@ -48,6 +48,10 @@ class NetworkService : Service() {
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     
+    // Time Sync Components
+    private val timeSyncEngine = TimeSyncEngine()
+    private var networkTimeProvider: NetworkTimeProvider? = null
+
     // Decomposed Helpers
     private var server: RexrayServer? = null
     private var client: RexrayClient? = null
@@ -185,6 +189,8 @@ class NetworkService : Service() {
                 server = s
                 client = c
                 
+                networkTimeProvider = NetworkTimeProvider(executor, timeSyncEngine)
+                
                 _isReady.value = true
                 Log.d(TAG, "Service bootstrap complete. Executing queued commands: ${commandQueue.size}")
                 
@@ -204,14 +210,27 @@ class NetworkService : Service() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        Log.d(TAG, "onDestroy: Shutting down NetworkService")
+        stopPulseBroadcaster()
+        stopSendingStatusUpdates()
+        unregisterService()
+        
         server?.stop()
         client?.disconnect()
+        networkTimeProvider?.stop()
         stopDiscovery()
-        unregisterService()
         releaseMulticastLock()
-        executor.shutdown()
-        scheduler.shutdown()
+        
+        executor.shutdownNow()
+        scheduler.shutdownNow()
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            stopForeground(true)
+        }
+        
+        super.onDestroy()
     }
 
     private fun handlePrimaryMessage(message: Message) {
@@ -288,6 +307,10 @@ class NetworkService : Service() {
 
             _serviceRole.value = ServiceRole.PRIMARY
             _projectName.value = name
+            
+            // Start PTP-like Master
+            networkTimeProvider?.start(isMaster = true)
+            startPulseBroadcaster()
 
             val serviceInfo = NsdServiceInfo().apply {
                 this.serviceName = name
@@ -316,9 +339,15 @@ class NetworkService : Service() {
     }
 
     fun unregisterService() {
-        registrationListener?.let { nsdManager.unregisterService(it) }
+        registrationListener?.let { 
+            try {
+                nsdManager.unregisterService(it)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error unregistering service", e)
+            }
+        }
         registrationListener = null
-        server?.stop()
+        stopPulseBroadcaster()
         _serviceRole.value = ServiceRole.IDLE
     }
 
@@ -361,7 +390,13 @@ class NetworkService : Service() {
 
     fun stopDiscovery() {
         Log.d(TAG, "Stopping service discovery")
-        discoveryListener?.let { nsdManager.stopServiceDiscovery(it) }
+        discoveryListener?.let { 
+            try {
+                nsdManager.stopServiceDiscovery(it)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping discovery", e)
+            }
+        }
         discoveryListener = null
     }
 
@@ -391,11 +426,16 @@ class NetworkService : Service() {
         Log.d(TAG, "Connecting to Primary: ${serviceInfo.host.hostAddress}:${serviceInfo.port}")
         client?.connect(serviceInfo.host.hostAddress!!, serviceInfo.port)
         _serviceRole.value = ServiceRole.CLIENT
+        
+        // Start PTP-like Node
+        networkTimeProvider?.start(isMaster = false)
+        startSendingStatusUpdates()
     }
 
     fun disconnectFromPrimary() {
         Log.d(TAG, "Disconnecting from Primary")
         stopSendingStatusUpdates()
+        networkTimeProvider?.stop()
         client?.send(Message.LeaveGroup)
         client?.disconnect()
         _serviceRole.value = ServiceRole.IDLE
@@ -405,6 +445,8 @@ class NetworkService : Service() {
         if (_serviceRole.value == ServiceRole.PRIMARY) {
             Log.d(TAG, "Attempting to broadcast message: $message")
             server?.broadcast(message)
+            // Loopback for local node to ensure it processes the same command sequence
+            _incomingMessages.tryEmit(null to message)
         }
     }
 
@@ -415,6 +457,21 @@ class NetworkService : Service() {
     }
 
     private var statusUpdateJob: java.util.concurrent.ScheduledFuture<*>? = null
+    private var pulseJob: java.util.concurrent.ScheduledFuture<*>? = null
+
+    private fun startPulseBroadcaster() {
+        pulseJob?.cancel(true)
+        if (!scheduler.isShutdown) {
+            pulseJob = scheduler.scheduleWithFixedDelay({
+                networkTimeProvider?.broadcastPulse()
+            }, 1, 5, TimeUnit.SECONDS)
+        }
+    }
+
+    private fun stopPulseBroadcaster() {
+        pulseJob?.cancel(true)
+        pulseJob = null
+    }
 
     private fun startSendingStatusUpdates() {
         updateStatusUpdateSpeed()
@@ -422,12 +479,15 @@ class NetworkService : Service() {
 
     private fun stopSendingStatusUpdates() {
         statusUpdateJob?.cancel(true)
+        statusUpdateJob = null
     }
 
     private fun updateStatusUpdateSpeed() {
         statusUpdateJob?.cancel(true)
-        val period = if (isClientArmed) 250L else 2000L
-        statusUpdateJob = scheduler.scheduleWithFixedDelay({ sendStatusUpdate() }, 0, period, TimeUnit.MILLISECONDS)
+        if (_serviceRole.value == ServiceRole.CLIENT && !scheduler.isShutdown) {
+            val period = if (isClientArmed) 250L else 2000L
+            statusUpdateJob = scheduler.scheduleWithFixedDelay({ sendStatusUpdate() }, 0, period, TimeUnit.MILLISECONDS)
+        }
     }
 
     fun sendStatusUpdate() {
@@ -435,9 +495,15 @@ class NetworkService : Service() {
         sendMessageToPrimary(message)
     }
     
+    fun getSynchronizedTimeNanos(): Long {
+        return timeSyncEngine.getSynchronizedTimeNanos()
+    }
+    
+    fun getSyncEngine(): TimeSyncEngine = timeSyncEngine
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "Network Service", NotificationManager.IMPORTANCE_DEFAULT)
+            val channel = NotificationChannel(CHANNEL_ID, "Network Service", NotificationManager.IMPORTANCE_LOW)
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
         }
@@ -446,8 +512,9 @@ class NetworkService : Service() {
     private fun createNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Rexray Vision")
-            .setContentText("Network service is running.")
+            .setContentText("Network service is active.")
             .setSmallIcon(R.mipmap.ic_launcher)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 

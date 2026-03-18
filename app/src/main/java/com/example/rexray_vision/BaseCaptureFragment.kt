@@ -115,7 +115,7 @@ class BaseCaptureFragment : Fragment() {
 
     private fun initializeResourcesAndSession(camera: CameraDevice) {
         val characteristics = cameraManager.getCameraCharacteristics(camera.id)
-        val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.RAW
+        val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.JPEG
         
         if (mode == NetworkService.CaptureMode.RAW) {
             val configurationMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -123,7 +123,6 @@ class BaseCaptureFragment : Fragment() {
             
             if (rawSize != null) {
                 val bufferSize = (rawSize.width * rawSize.height * 2.5).toInt()
-                Log.d(tag, "Initializing ByteBufferPool for RAW capture. Size: $rawSize, BufferSize: $bufferSize bytes")
                 byteBufferPool = ByteBufferPool(bufferSize, 15)
                 
                 val dngWriterThreads = (activity as? CaptureActivity)?.getDngWriterThreads() ?: 1
@@ -132,13 +131,11 @@ class BaseCaptureFragment : Fragment() {
                 captureStateHandler = CaptureStateHandler(::handleRawCapture, byteBufferPool!!)
                 createCameraPreviewSession()
             } else {
-                Log.e(tag, "Failed to get RAW_SENSOR output sizes.")
                 activity?.runOnUiThread {
                     Toast.makeText(requireContext(), "RAW Capture not supported on this device.", Toast.LENGTH_LONG).show()
                 }
             }
         } else {
-            Log.d(tag, "Initializing resources for JPEG capture.")
             val dngWriterThreads = (activity as? CaptureActivity)?.getDngWriterThreads() ?: 1
             imageSaver = ImageSaver(requireContext(), characteristics, null, {}, dngWriterThreads)
             imageSaver.start()
@@ -148,7 +145,6 @@ class BaseCaptureFragment : Fragment() {
 
     private val textureListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(surface: android.graphics.SurfaceTexture, width: Int, height: Int) {
-            Log.d(tag, "SurfaceTexture available.")
             checkPermissionsAndOpenCamera(width, height)
         }
 
@@ -186,11 +182,11 @@ class BaseCaptureFragment : Fragment() {
         super.onStart()
         startBackgroundThread()
         rexrayCameraManager = RexrayCameraManager(requireContext(), backgroundHandler)
+        cameraExecutor = Executors.newSingleThreadExecutor()
         cameraSessionManager = CameraSessionManager(rexrayCameraManager, backgroundHandler, cameraExecutor)
         
         lifecycleScope.launch {
             (activity as? CaptureActivity)?.networkService?.captureMode?.collectLatest { mode ->
-                Log.d(tag, "Capture mode changed to: $mode. Reconfiguring session.")
                 rexrayCameraManager.cameraDevice?.let { camera ->
                     cameraExecutor.execute {
                         cameraSessionManager.close()
@@ -217,8 +213,6 @@ class BaseCaptureFragment : Fragment() {
 
     override fun onStop() {
         super.onStop()
-        Log.d(tag, "onStop: Backgrounding camera resources asynchronously.")
-        
         cameraExecutor.execute {
             try {
                 cameraSessionManager.close()
@@ -228,10 +222,7 @@ class BaseCaptureFragment : Fragment() {
                 
                 if (::imageSaver.isInitialized) {
                     if (imageSaver.activeTaskCount.value == 0) {
-                        Log.d(tag, "ImageSaver is idle, stopping.")
                         imageSaver.stop()
-                    } else {
-                        Log.d(tag, "ImageSaver has active tasks, letting it finish in background.")
                     }
                 }
             } catch (e: Exception) {
@@ -242,27 +233,49 @@ class BaseCaptureFragment : Fragment() {
         }
     }
 
-    override fun onDetach() {
-        super.onDetach()
-        listener = null
+    fun stopPreviewAndReleaseCamera() {
+        cameraExecutor.execute {
+            Log.d(tag, "Explicitly closing session and camera for arming state.")
+            cameraSessionManager.close()
+            if (::rexrayCameraManager.isInitialized) {
+                rexrayCameraManager.closeCamera()
+            }
+            if (::imageSaver.isInitialized) {
+                imageSaver.stop()
+            }
+        }
+    }
+
+    fun stopPreview() {
+        cameraExecutor.execute {
+            cameraSessionManager.close()
+        }
+    }
+
+    fun startPreview() {
+        if (textureView.isAvailable) {
+            checkPermissionsAndOpenCamera(textureView.width, textureView.height)
+        }
+    }
+
+    fun getPhysicalIds(): List<String> {
+        return listOf(rexrayCameraManager.cameraDevice?.id ?: "0")
     }
 
     private fun checkPermissionsAndOpenCamera(width: Int, height: Int) {
         if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
         } else {
-            Log.d(tag, "Camera permission granted, opening camera.")
             rexrayCameraManager.openCamera(width, height, cameraStateCallback)
         }
     }
 
     private fun createCameraPreviewSession() {
-        Log.d(tag, "Creating camera preview session.")
         val texture = textureView.surfaceTexture ?: return
         rexrayCameraManager.previewSize?.let { texture.setDefaultBufferSize(it.width, it.height) }
         previewSurface = Surface(texture)
 
-        val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.RAW
+        val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.JPEG
 
         if (mode == NetworkService.CaptureMode.RAW) {
             rexrayCameraManager.rawImageReader.setOnImageAvailableListener({ reader: ImageReader ->
@@ -300,7 +313,6 @@ class BaseCaptureFragment : Fragment() {
 
         val sessionStateCallback = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(session: CameraCaptureSession) {
-                Log.d(tag, "Camera session configured.")
                 if (rexrayCameraManager.cameraDevice == null) return
                 cameraSessionManager.cameraCaptureSession = session
                 listener?.onCameraReady()
@@ -346,10 +358,10 @@ class BaseCaptureFragment : Fragment() {
             }
 
             val derivative = error - previousError
-            val pTerm = pGain * error
+            val pGain = pGain * error
             val dTerm = dGain * derivative
 
-            val unCappedAdjustment = pTerm + iGain * integral + dTerm
+            val unCappedAdjustment = pGain + iGain * integral + dTerm
             val isoAdjustment = unCappedAdjustment.roundToInt()
             val newIso = (currentIso + isoAdjustment).coerceIn(50, 1000)
 
@@ -388,7 +400,6 @@ class BaseCaptureFragment : Fragment() {
             (activity as? CaptureActivity)?.broadcastSettings()
         }
         listener?.onAutoIsoStateChanged(newState)
-        Log.d(tag, "Auto-ISO enabled: $newState")
     }
 
     fun updatePreview(iso: Int, shutterSpeed: Long) {
@@ -400,13 +411,11 @@ class BaseCaptureFragment : Fragment() {
     }
 
     fun startBurstCapture(iso: Int, shutterSpeed: Long, captureRate: Int, captureLimit: Int) {
-        Log.d(tag, "Starting burst capture.")
         capturedImageCount.set(0)
-        // Reset migration flag at start of burst
         isAwaitingMigration.set(false)
         burstRotation = activity?.windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
         
-        val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.RAW
+        val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.JPEG
         if (mode == NetworkService.CaptureMode.RAW) {
             captureStateHandler?.clear()
         }
@@ -425,18 +434,16 @@ class BaseCaptureFragment : Fragment() {
     }
 
     fun stopBurstCapture() {
-        Log.d(tag, "Stopping burst capture.")
         if (isCapturing.getAndSet(false)) {
             val activity = activity as? CaptureActivity
             activity?.let {
                 cameraSessionManager.stopBurstAndResumePreview(it.getIso(), it.getShutterSpeed())
             }
             
-            val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.RAW
+            val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.JPEG
             if (mode == NetworkService.CaptureMode.RAW) {
                 captureStateHandler?.clear()
             }
-            // Set migration flag only when burst explicitly stops
             isAwaitingMigration.set(true)
         }
     }
@@ -512,17 +519,16 @@ class BaseCaptureFragment : Fragment() {
     private fun startBackgroundThread() {
         backgroundThread = HandlerThread("CameraBackground").also { it.start() }
         backgroundHandler = Handler(backgroundThread.looper)
-        cameraExecutor = Executors.newSingleThreadExecutor()
     }
 
     private fun stopBackgroundThread() {
-        backgroundThread.quitSafely()
-        try {
-            backgroundThread.join()
-            cameraExecutor.shutdown()
-            cameraExecutor.awaitTermination(1, TimeUnit.SECONDS)
-        } catch (e: InterruptedException) {
-            Log.e(tag, "Error stopping background thread", e)
+        if (::backgroundThread.isInitialized) {
+            backgroundThread.quitSafely()
+            try {
+                backgroundThread.join()
+            } catch (e: InterruptedException) {
+                Log.e(tag, "Error stopping background thread", e)
+            }
         }
     }
 

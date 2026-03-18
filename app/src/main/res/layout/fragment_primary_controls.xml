@@ -242,33 +242,6 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"/>
 
-        <androidx.appcompat.widget.SwitchCompat
-            android:id="@+id/captureModeSwitch"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Raw Mode: OFF"
-            android:textColor="@android:color/white"
-            app:layout_constraintTop_toBottomOf="@id/captureLimitSeekBar"
-            app:layout_constraintStart_toStartOf="parent"/>
-
-        <androidx.appcompat.widget.SwitchCompat
-            android:id="@+id/flashToggleSwitch"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Flash: OFF"
-            android:textColor="@android:color/white"
-            app:layout_constraintTop_toBottomOf="@id/captureModeSwitch"
-            app:layout_constraintStart_toStartOf="parent"/>
-
-        <SeekBar
-            android:id="@+id/flashIntensitySeekBar"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:max="2"
-            app:layout_constraintTop_toBottomOf="@id/flashToggleSwitch"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"/>
-
         <Button
             android:id="@+id/analyzeSceneButton"
             android:layout_width="wrap_content"
@@ -341,7 +314,7 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintBottom_toBottomOf="parent" />
 
-    <!-- MIGRATION OVERLAY (NEW) -->
+    <!-- MIGRATION OVERLAY -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/migrationOverlay"
         android:layout_width="match_parent"

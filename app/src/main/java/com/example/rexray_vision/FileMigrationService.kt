@@ -68,9 +68,9 @@ class FileMigrationService : LifecycleService() {
             _isMigrating.value = true
             val cacheDir = File(cacheDirPath)
             
-            // Optimization: Sort files by name (which contains timestamp) to ensure chronological migration
+            val allowedExtensions = setOf("dng", "jpg", "csv", "ply", "xmp")
             val files = cacheDir.listFiles()
-                ?.filter { it.isFile && (it.extension == "dng" || it.extension == "jpg") }
+                ?.filter { it.isFile && it.extension.lowercase() in allowedExtensions }
                 ?.sortedBy { it.name } ?: emptyList()
 
             val totalFiles = files.size
@@ -104,16 +104,32 @@ class FileMigrationService : LifecycleService() {
 
     private fun migrateFile(file: File) {
         try {
-            val isDng = file.extension == "dng"
+            val ext = file.extension.lowercase()
+            val mimeType = when (ext) {
+                "dng" -> "image/x-adobe-dng"
+                "jpg", "jpeg" -> "image/jpeg"
+                "csv" -> "text/csv"
+                "ply" -> "application/octet-stream"
+                "xmp" -> "application/rdf+xml"
+                else -> "application/octet-stream"
+            }
+
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
-                put(MediaStore.MediaColumns.MIME_TYPE, if (isDng) "image/x-adobe-dng" else "image/jpeg")
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
                 put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Rexray_vision")
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
 
             val resolver = contentResolver
-            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            
+            val collection = if (ext == "jpg" || ext == "dng") {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            } else {
+                MediaStore.Files.getContentUri("external")
+            }
+
+            val uri = resolver.insert(collection, contentValues)
 
             uri?.let {
                 resolver.openOutputStream(it)?.use { outputStream ->
@@ -149,7 +165,7 @@ class FileMigrationService : LifecycleService() {
     private fun createNotification(current: Int, total: Int): Notification {
         val progressText = if (total > 0) "Moving $current of $total files..." else "Preparing migration..."
         return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Migrating Images")
+            .setContentTitle("Migrating Session Data")
             .setContentText(progressText)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setProgress(total, current, total == 0)
