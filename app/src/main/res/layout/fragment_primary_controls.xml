@@ -3,316 +3,286 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent">
 
-    <!-- HORIZONTAL GUIDELINES -->
+    <!-- GUIDELINES -->
     <androidx.constraintlayout.widget.Guideline
-        android:id="@+id/guideline_top_end"
+        android:id="@+id/safeTop"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        app:layout_constraintGuide_percent="0.20" />
+        app:layout_constraintGuide_begin="48dp" />
 
     <androidx.constraintlayout.widget.Guideline
-        android:id="@+id/guideline_middle_end"
+        android:id="@+id/safeBottom"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        app:layout_constraintGuide_percent="0.80" />
+        app:layout_constraintGuide_end="48dp" />
 
     <androidx.constraintlayout.widget.Guideline
-        android:id="@+id/guideline_bot_middle"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        app:layout_constraintGuide_percent="0.90" />
-
-    <!-- VERTICAL GUIDELINES -->
-    <androidx.constraintlayout.widget.Guideline
-        android:id="@+id/guideline_v_33"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        app:layout_constraintGuide_percent="0.33" />
-
-    <androidx.constraintlayout.widget.Guideline
-        android:id="@+id/guideline_v_50"
+        android:id="@+id/midV"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:orientation="vertical"
         app:layout_constraintGuide_percent="0.5" />
 
     <androidx.constraintlayout.widget.Guideline
-        android:id="@+id/guideline_v_66"
+        android:id="@+id/midH"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        app:layout_constraintGuide_percent="0.66" />
+        android:orientation="horizontal"
+        app:layout_constraintGuide_percent="0.5" />
 
-
-    <!-- ======================= -->
-    <!--     TOP SEGMENT         -->
-    <!-- ======================= -->
-    <com.example.rexray_vision.HistogramView
-        android:id="@+id/histogramView"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:layout_margin="8dp"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toStartOf="@id/guideline_v_50"
-        app:layout_constraintBottom_toTopOf="@id/guideline_top_end" />
-
-    <Button
-        android:id="@+id/closeAppButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Close App"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toEndOf="@id/guideline_v_50"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintBottom_toTopOf="@id/guideline_top_end" />
-
-    <!-- ======================= -->
-    <!--    MIDDLE SEGMENT       -->
-    <!-- ======================= -->
-
-    <!-- Col 1 -->
-    <Button
-        android:id="@+id/stopServerButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/stop_server"
-        app:layout_constraintTop_toBottomOf="@id/guideline_top_end"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toStartOf="@id/guideline_v_33" />
-
+    <!-- TOP-LEFT: CLIENT LIST -->
     <LinearLayout
         android:id="@+id/clientListContainer"
         android:layout_width="0dp"
         android:layout_height="0dp"
-        android:orientation="vertical"
         android:layout_margin="8dp"
         android:background="@drawable/rounded_black_bg"
-        app:layout_constraintTop_toBottomOf="@id/stopServerButton"
+        android:orientation="vertical"
+        android:padding="12dp"
+        app:layout_constraintBottom_toTopOf="@+id/midH"
+        app:layout_constraintEnd_toStartOf="@+id/midV"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toStartOf="@id/guideline_v_33"
-        app:layout_constraintBottom_toTopOf="@id/guideline_middle_end" >
+        app:layout_constraintTop_toTopOf="@+id/safeTop">
+
         <TextView
-            android:id="@+id/clientListHeader"
-            android:layout_width="match_parent"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/connected_clients"
-            android:textColor="@android:color/white"
-            android:gravity="center_horizontal"
-            android:padding="8dp"/>
+            android:text="CONNECTED CLIENTS"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
         <ListView
             android:id="@+id/clientListView"
             android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+            android:layout_height="match_parent"
+            android:layout_marginTop="8dp" />
     </LinearLayout>
 
-    <!-- Col 2 -->
-    <TextView
-        android:id="@+id/captureCounter"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:background="#80000000"
-        android:padding="8dp"
-        android:textColor="@android:color/white"
-        android:textSize="24sp"
-        android:textStyle="bold"
-        android:visibility="invisible"
-        app:layout_constraintBottom_toTopOf="@id/settingsDisplayTextView"
-        app:layout_constraintStart_toEndOf="@id/guideline_v_33"
-        app:layout_constraintEnd_toStartOf="@id/guideline_v_66"
-        android:layout_marginBottom="8dp"
-        tools:text="123"
-        tools:visibility="visible"/>
-
-    <TextView
-        android:id="@+id/settingsDisplayTextView"
+    <!-- RIGHT-CENTER: SETTINGS -->
+    <LinearLayout
+        android:id="@+id/settingsContainer"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_margin="8dp"
         android:background="@drawable/rounded_black_bg"
-        android:gravity="center"
-        android:padding="8dp"
-        android:textColor="@android:color/white"
-        tools:text="ISO: 400\nS: 1/300\nFPS: 5\nLimit: 5"
-        app:layout_constraintBottom_toTopOf="@id/guideline_middle_end"
-        app:layout_constraintStart_toEndOf="@id/guideline_v_33"
-        app:layout_constraintEnd_toStartOf="@id/guideline_v_66" />
-
-    <!-- Col 3 -->
-    <androidx.constraintlayout.widget.ConstraintLayout
-        android:id="@+id/settingsLayout"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:layout_margin="8dp"
-        android:background="@drawable/rounded_black_bg"
-        android:padding="8dp"
-        app:layout_constraintTop_toBottomOf="@id/guideline_top_end"
-        app:layout_constraintStart_toEndOf="@id/guideline_v_66"
+        android:orientation="vertical"
+        android:padding="16dp"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintBottom_toTopOf="@id/guideline_middle_end">
+        app:layout_constraintStart_toEndOf="@+id/midV"
+        app:layout_constraintTop_toTopOf="parent">
 
         <TextView
             android:id="@+id/isoValueTextView"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="@android:color/white"
-            tools:text="ISO: 100"
-            app:layout_constraintTop_toTopOf="parent"
-            app:layout_constraintStart_toStartOf="parent"/>
-
-        <TextView
-            android:id="@+id/autoIsoIndicator"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="AUTO"
-            android:textColor="@android:color/holo_red_light"
-            android:textStyle="bold"
-            android:visibility="gone"
-            app:layout_constraintTop_toTopOf="@id/isoValueTextView"
-            app:layout_constraintBottom_toBottomOf="@id/isoValueTextView"
-            app:layout_constraintStart_toEndOf="@id/isoValueTextView"
-            android:layout_marginStart="8dp"/>
+            android:textColor="#FFFFFF"
+            tools:text="ISO: 400" />
 
         <SeekBar
             android:id="@+id/isoSeekBar"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="8dp"
-            app:layout_constraintTop_toBottomOf="@id/isoValueTextView"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"/>
+            android:paddingVertical="8dp" />
 
         <TextView
             android:id="@+id/shutterSpeedValueTextView"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="@android:color/white"
-            tools:text="1/1000s"
-            android:layout_marginTop="8dp"
-            app:layout_constraintTop_toBottomOf="@id/isoSeekBar"
-            app:layout_constraintStart_toStartOf="parent"/>
+            android:textColor="#FFFFFF"
+            tools:text="SHUTTER: 1/300" />
+
         <SeekBar
             android:id="@+id/shutterSpeedSeekBar"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="8dp"
-            app:layout_constraintTop_toBottomOf="@id/shutterSpeedValueTextView"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"/>
+            android:paddingVertical="8dp" />
 
         <TextView
             android:id="@+id/captureRateValueTextView"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="@android:color/white"
-            tools:text="10fps"
-            android:layout_marginTop="8dp"
-            app:layout_constraintTop_toBottomOf="@id/shutterSpeedSeekBar"
-            app:layout_constraintStart_toStartOf="parent"/>
+            android:textColor="#FFFFFF"
+            tools:text="FPS: 5" />
+
         <SeekBar
             android:id="@+id/captureRateSeekBar"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:max="12"
-            app:layout_constraintTop_toBottomOf="@id/captureRateValueTextView"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"/>
+            android:paddingVertical="8dp" />
 
         <TextView
             android:id="@+id/captureLimitValueTextView"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="@android:color/white"
-            tools:text="Limit: 5"
-            android:layout_marginTop="8dp"
-            app:layout_constraintTop_toBottomOf="@id/captureRateSeekBar"
-            app:layout_constraintStart_toStartOf="parent"/>
+            android:textColor="#FFFFFF"
+            tools:text="LIMIT: 30" />
+
         <SeekBar
             android:id="@+id/captureLimitSeekBar"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:max="299"
-            app:layout_constraintTop_toBottomOf="@id/captureLimitValueTextView"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"/>
+            android:paddingVertical="8dp" />
 
         <Button
             android:id="@+id/analyzeSceneButton"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Auto-ISO"
-            app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent" />
+            android:backgroundTint="#6200EE"
+            android:text="ANALYZE SCENE" />
+    </LinearLayout>
 
-    </androidx.constraintlayout.widget.ConstraintLayout>
-
-    <!-- ======================= -->
-    <!--     BOT SEGMENT         -->
-    <!-- ======================= -->
-    <LinearLayout
-        android:id="@+id/nameContainer"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:layout_margin="8dp"
-        android:background="@drawable/rounded_black_bg"
-        android:orientation="vertical"
-        android:gravity="center"
-        app:layout_constraintTop_toBottomOf="@id/guideline_middle_end"
+    <!-- BOTTOM-LEFT STATUS STACK -->
+    <com.example.rexray_vision.HistogramView
+        android:id="@+id/histogramView"
+        android:layout_width="140dp"
+        android:layout_height="100dp"
+        android:layout_margin="16dp"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toStartOf="@id/guideline_v_50"
-        app:layout_constraintBottom_toTopOf="@id/guideline_bot_middle">
+        app:layout_constraintTop_toBottomOf="@+id/midH" />
+
+    <LinearLayout
+        android:id="@+id/projectInfoContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginBottom="16dp"
+        android:background="#A0000000"
+        android:orientation="vertical"
+        android:padding="8dp"
+        app:layout_constraintBottom_toTopOf="@+id/newProjectButton"
+        app:layout_constraintStart_toStartOf="parent">
+
         <TextView
             android:id="@+id/projectNameTextView"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:gravity="center"
-            android:textColor="@android:color/white"
-            tools:text="Project: Calm-Map" />
+            android:textColor="#FFFFFF"
+            tools:text="Project: Default" />
+
         <TextView
             android:id="@+id/cameraNameTextView"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:gravity="center"
-            android:textColor="@android:color/white"
-            tools:text="Camera: Puma" />
+            android:textColor="#FFFFFF"
+            tools:text="Camera: Server" />
     </LinearLayout>
 
-    <Button
-        android:id="@+id/newProjectButton"
+    <TextView
+        android:id="@+id/captureCounter"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="New Project"
-        app:layout_constraintTop_toBottomOf="@id/guideline_bot_middle"
+        android:layout_marginStart="16dp"
+        android:layout_marginBottom="8dp"
+        android:textColor="#FFFFFF"
+        android:textSize="32sp"
+        android:textStyle="bold"
+        android:visibility="invisible"
+        app:layout_constraintBottom_toTopOf="@+id/projectInfoContainer"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toStartOf="@id/guideline_v_50"
-        app:layout_constraintBottom_toBottomOf="parent" />
+        tools:text="30"
+        tools:visibility="visible" />
+
+    <TextView
+        android:id="@+id/settingsDisplayTextView"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:background="@drawable/rounded_black_bg"
+        android:padding="8dp"
+        android:textColor="#FFFFFF"
+        app:layout_constraintBottom_toTopOf="@+id/armButton"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        tools:text="ISO: 400 | S: 1/300" />
+
+    <!-- PRIMARY ACTION ROW (Weighted Chain) -->
+    <Button
+        android:id="@+id/newProjectButton"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_margin="4dp"
+        android:text="NEW PROJECT"
+        app:layout_constraintBottom_toTopOf="@+id/stopServerButton"
+        app:layout_constraintEnd_toStartOf="@+id/armButton"
+        app:layout_constraintHorizontal_weight="1"
+        app:layout_constraintStart_toStartOf="parent" />
 
     <Button
         android:id="@+id/armButton"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:text="Arm"
-        app:layout_constraintTop_toBottomOf="@id/guideline_middle_end"
-        app:layout_constraintStart_toEndOf="@id/guideline_v_50"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintBottom_toTopOf="@id/guideline_bot_middle" />
+        android:layout_margin="4dp"
+        android:text="ARM SYSTEM"
+        app:layout_constraintBottom_toBottomOf="@+id/newProjectButton"
+        app:layout_constraintEnd_toStartOf="@+id/captureButton"
+        app:layout_constraintHorizontal_weight="1"
+        app:layout_constraintStart_toEndOf="@+id/newProjectButton" />
 
     <Button
         android:id="@+id/captureButton"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_margin="4dp"
+        android:enabled="false"
+        android:text="START CAPTURE"
+        app:layout_constraintBottom_toBottomOf="@+id/newProjectButton"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_weight="1"
+        app:layout_constraintStart_toEndOf="@+id/armButton" />
+
+    <Button
+        android:id="@+id/saveResetButton"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_margin="4dp"
+        android:backgroundTint="#4CAF50"
+        android:text="SAVE &amp; RESET"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@+id/captureButton"
+        app:layout_constraintEnd_toEndOf="@+id/captureButton"
+        app:layout_constraintStart_toStartOf="@+id/captureButton"
+        tools:visibility="gone" />
+
+    <!-- EXIT ACTIONS -->
+    <Button
+        android:id="@+id/stopServerButton"
+        style="@style/Widget.AppCompat.Button.Borderless"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/capture"
-        app:layout_constraintTop_toBottomOf="@id/guideline_bot_middle"
-        app:layout_constraintStart_toEndOf="@id/guideline_v_50"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent" />
+        android:text="STOP SERVER"
+        android:textColor="#FF5252"
+        app:layout_constraintBottom_toBottomOf="@+id/safeBottom"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <Button
+        android:id="@+id/closeAppButton"
+        style="@style/Widget.AppCompat.Button.Borderless"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="CLOSE APP"
+        android:textColor="#FF5252"
+        app:layout_constraintBottom_toBottomOf="@+id/safeBottom"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- OVERLAYS -->
+    <TextView
+        android:id="@+id/autoIsoIndicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:text="AUTO-ISO ACTIVE"
+        android:textColor="#FF0000"
+        android:textStyle="bold"
+        android:visibility="gone"
+        app:layout_constraintStart_toEndOf="@+id/histogramView"
+        app:layout_constraintTop_toTopOf="@+id/histogramView" />
 
     <!-- MIGRATION OVERLAY -->
     <androidx.constraintlayout.widget.ConstraintLayout
@@ -320,29 +290,27 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:background="#AA000000"
-        android:clickable="true"
-        android:focusable="true"
-        android:visibility="gone"
-        tools:visibility="visible">
+        android:elevation="100dp"
+        android:visibility="gone">
 
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:background="@drawable/rounded_black_bg"
+            android:gravity="center"
             android:orientation="vertical"
             android:padding="24dp"
-            android:gravity="center"
-            app:layout_constraintTop_toTopOf="parent"
             app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent">
+            app:layout_constraintTop_toTopOf="parent">
 
             <TextView
                 android:id="@+id/migrationStatusTextView"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Finalizing Disk Writes..."
-                android:textColor="@android:color/white"
+                android:text="Processing..."
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -351,8 +319,7 @@
                 style="?android:attr/progressBarStyleHorizontal"
                 android:layout_width="200dp"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:max="100" />
+                android:layout_marginTop="16dp" />
 
             <TextView
                 android:id="@+id/migrationProgressTextView"
@@ -360,7 +327,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:text="0%"
-                android:textColor="@android:color/white" />
+                android:textColor="#FFFFFF" />
         </LinearLayout>
     </androidx.constraintlayout.widget.ConstraintLayout>
 

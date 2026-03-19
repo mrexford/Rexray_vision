@@ -114,16 +114,23 @@ class FileMigrationService : LifecycleService() {
                 else -> "application/octet-stream"
             }
 
+            val isImage = (ext == "jpg" || ext == "jpeg" || ext == "dng")
+            val relativePath = if (isImage) {
+                "${Environment.DIRECTORY_PICTURES}/Rexray_vision"
+            } else {
+                "${Environment.DIRECTORY_DOCUMENTS}/Rexray_vision"
+            }
+
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
                 put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Rexray_vision")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
 
             val resolver = contentResolver
             
-            val collection = if (ext == "jpg" || ext == "dng") {
+            val collection = if (isImage) {
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             } else {
                 MediaStore.Files.getContentUri("external")
@@ -142,7 +149,7 @@ class FileMigrationService : LifecycleService() {
                 contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
                 resolver.update(it, contentValues, null, null)
                 file.delete()
-                Log.i(tag, "Successfully migrated ${file.name}")
+                Log.i(tag, "Successfully migrated ${file.name} to $relativePath")
             } ?: Log.e(tag, "Failed to create MediaStore entry for ${file.name}")
 
         } catch (e: Exception) {

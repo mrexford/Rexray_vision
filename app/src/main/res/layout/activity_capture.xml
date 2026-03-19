@@ -2,6 +2,7 @@
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/captureRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     tools:context=".CaptureActivity">
@@ -16,32 +17,18 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- ARCORE PREVIEW OVERLAY (ARMED STATE) -->
+    <!-- ARCORE PREVIEW OVERLAY (Full Screen) -->
     <SurfaceView
         android:id="@+id/arcoreSurfaceView"
-        android:layout_width="200dp"
-        android:layout_height="150dp"
-        android:layout_margin="16dp"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
         android:visibility="gone"
-        android:background="#000000"
         app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        tools:visibility="visible" />
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 
-    <TextView
-        android:id="@+id/arStatusText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="AR SCANNING"
-        android:textColor="#00FF00"
-        android:textSize="12sp"
-        android:textStyle="bold"
-        android:visibility="gone"
-        app:layout_constraintTop_toBottomOf="@id/arcoreSurfaceView"
-        app:layout_constraintEnd_toEndOf="@id/arcoreSurfaceView"
-        tools:visibility="visible" />
-
-    <!-- Layer 2: Main UI -->
+    <!-- Layer 2: Main UI Controls -->
     <androidx.fragment.app.FragmentContainerView
         android:id="@+id/controlsFragmentContainer"
         android:layout_width="0dp"
@@ -51,21 +38,54 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Green Border (Moved to Layer 2.5, above controls) -->
+    <!-- Safe Area Guideline for Status UI (Pushes below notification bar) -->
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/statusBarSafeGuide"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        app:layout_constraintGuide_begin="80dp" />
+
+    <!-- Layer 3: Status Overlay (High Elevation) -->
+    <LinearLayout
+        android:id="@+id/statusOverlayContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:gravity="end"
+        android:elevation="50dp"
+        android:padding="8dp"
+        app:layout_constraintTop_toTopOf="@id/statusBarSafeGuide"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:id="@+id/arStatusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="AR SCANNING"
+            android:textColor="#FFFF00"
+            android:background="#A0000000"
+            android:padding="10dp"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone"
+            tools:visibility="visible" />
+    </LinearLayout>
+
+    <!-- Green Border (Foreground) -->
     <View
         android:id="@+id/captureInProgressBorder"
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:background="@drawable/green_border"
         android:visibility="gone"
-        android:elevation="10dp"
+        android:elevation="60dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
-        tools:visibility="visible"/>
+        app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Layer 3: Popup -->
+    <!-- Loading Indicator - Added back to fix build errors -->
     <FrameLayout
         android:id="@+id/loadingIndicator"
         android:layout_width="0dp"
@@ -74,12 +94,11 @@
         android:clickable="true"
         android:focusable="true"
         android:visibility="gone"
-        android:elevation="20dp"
+        android:elevation="70dp"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        tools:visibility="visible">
+        app:layout_constraintEnd_toEndOf="parent">
 
         <LinearLayout
             android:layout_width="wrap_content"

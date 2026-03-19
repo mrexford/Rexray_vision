@@ -8,16 +8,20 @@ import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
 import android.opengl.GLES20
 import android.util.Log
+import android.view.SurfaceHolder
 import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 
 /**
- * AnchorEngine handles ARCore spatial mapping.
- * To avoid AR_ERROR_MISSING_GL_CONTEXT, we maintain a minimal offscreen EGL context.
+ * AnchorEngine handles ARCore spatial mapping and real-time visualization.
+ * Robust against buffer overflows and viewport geometry race conditions.
  */
 class AnchorEngine(private val context: Context) {
     private val TAG = "AnchorEngine"
@@ -27,13 +31,36 @@ class AnchorEngine(private val context: Context) {
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
-    private var dummyTextureId: Int = -1
 
-    fun initializeSession() {
+    private var renderer: PointRenderer? = null
+    private var viewportWidth = 0
+    private var viewportHeight = 0
+    private var displayRotation = 0
+
+    // Point Cloud Management
+    enum class CloudMode { STREAMING, ACCUMULATING, REVIEW }
+    private var currentMode = CloudMode.STREAMING
+    
+    private var pointBuffer: FloatBuffer? = null
+    private val maxPoints = 150000 
+    private var currentPointCount = 0
+
+    fun onSurfaceChanged(width: Int, height: Int, rotation: Int = 0) {
+        viewportWidth = width
+        viewportHeight = height
+        displayRotation = rotation
+        // Set geometry on session if it exists
+        arSession?.setDisplayGeometry(displayRotation, viewportWidth, viewportHeight)
+        Log.d(TAG, "Dimensions cached: $width x $height, rot: $rotation")
+    }
+
+    fun initializeSession(surfaceHolder: SurfaceHolder) {
         try {
             if (arSession != null) return
             
-            initEGL()
+            initEGL(surfaceHolder)
+            renderer = PointRenderer(context)
+            renderer?.init()
             
             arSession = Session(context)
             val config = Config(arSession)
@@ -41,25 +68,33 @@ class AnchorEngine(private val context: Context) {
             config.focusMode = Config.FocusMode.AUTO
             config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
             
-            // Enable depth if supported for better mapping
             if (arSession?.isDepthModeSupported(Config.DepthMode.AUTOMATIC) == true) {
                 config.depthMode = Config.DepthMode.AUTOMATIC
             }
             
             arSession?.configure(config)
+            renderer?.getTextureId()?.let { arSession?.setCameraTextureName(it) }
             
-            if (dummyTextureId != -1) {
-                arSession?.setCameraTextureName(dummyTextureId)
+            // Ensure geometry is set before resume
+            if (viewportWidth > 0 && viewportHeight > 0) {
+                arSession?.setDisplayGeometry(displayRotation, viewportWidth, viewportHeight)
             }
             
             arSession?.resume()
-            Log.d(TAG, "ARCore Session initialized and resumed with dummy GL context.")
+            GLES20.glClearColor(0.2f, 0.2f, 0.2f, 1.0f)
+            
+            pointBuffer = ByteBuffer.allocateDirect(maxPoints * 4 * 4).run {
+                order(ByteOrder.nativeOrder())
+                asFloatBuffer()
+            }
+            
+            Log.d(TAG, "ARCore Session initialized and resumed.")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize ARCore session", e)
         }
     }
 
-    private fun initEGL() {
+    private fun initEGL(surfaceHolder: SurfaceHolder) {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         val version = IntArray(2)
         EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
@@ -80,54 +115,115 @@ class AnchorEngine(private val context: Context) {
         EGL14.eglChooseConfig(eglDisplay, configAttr, 0, configs, 0, 1, numConfigs, 0)
         val config = configs[0]
 
-        val contextAttr = intArrayOf(
-            EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
-            EGL14.EGL_NONE
-        )
+        val contextAttr = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
         eglContext = EGL14.eglCreateContext(eglDisplay, config, EGL14.EGL_NO_CONTEXT, contextAttr, 0)
-
-        val surfaceAttr = intArrayOf(
-            EGL14.EGL_WIDTH, 1,
-            EGL14.EGL_HEIGHT, 1,
-            EGL14.EGL_NONE
-        )
-        eglSurface = EGL14.eglCreatePbufferSurface(eglDisplay, config, surfaceAttr, 0)
+        eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, config, surfaceHolder, null, 0)
         
         if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
             Log.e(TAG, "Failed to make EGL context current")
-            return
-        }
-
-        val textures = IntArray(1)
-        GLES20.glGenTextures(1, textures, 0)
-        dummyTextureId = textures[0]
-        Log.d(TAG, "Dummy GL Context and texture ($dummyTextureId) initialized.")
-    }
-
-    private fun ensureGlContext() {
-        if (eglDisplay != EGL14.EGL_NO_DISPLAY && eglContext != EGL14.EGL_NO_CONTEXT) {
-            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
         }
     }
 
-    fun getTrackingStatus(): String {
+    fun setMode(mode: CloudMode) {
+        Log.d(TAG, "Mode Change -> $mode")
+        currentMode = mode
+        if (mode == CloudMode.ACCUMULATING) {
+            currentPointCount = 0
+            pointBuffer?.clear() 
+            pointBuffer?.limit(0)
+        }
+    }
+
+    fun getPointCount(): Int = currentPointCount
+
+    fun updateAndRender(): String {
         val session = arSession ?: return "NOT_INITIALIZED"
+        if (viewportWidth <= 0 || viewportHeight <= 0) return "WAITING_GEOMETRY"
+
         return try {
-            ensureGlContext()
+            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+            
+            // Re-assert geometry to fix ARCore internal width:0 warnings
+            session.setDisplayGeometry(displayRotation, viewportWidth, viewportHeight)
+            
+            GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
+
             val frame = session.update()
-            frame.camera.trackingState.name
+            val trackingState = frame.camera.trackingState
+            
+            // Pass the whole frame for proper UV transformation
+            renderer?.drawCamera(frame)
+
+            var status = trackingState.name
+
+            if (trackingState == TrackingState.TRACKING) {
+                val pointCloud = frame.acquirePointCloud()
+                val points = pointCloud.points
+                val incomingCount = points.remaining() / 4
+                
+                if (incomingCount < 10 && currentMode != CloudMode.REVIEW) status = "LOW_FEATURES"
+
+                when (currentMode) {
+                    CloudMode.STREAMING -> {
+                        pointBuffer?.clear()
+                        val toPut = minOf(incomingCount, maxPoints)
+                        points.limit(toPut * 4)
+                        pointBuffer?.put(points)
+                        pointBuffer?.flip()
+                    }
+                    CloudMode.ACCUMULATING -> {
+                        accumulatePoints(points)
+                    }
+                    CloudMode.REVIEW -> {}
+                }
+                
+                val mvp = FloatArray(16)
+                val proj = FloatArray(16)
+                val view = FloatArray(16)
+                frame.camera.getProjectionMatrix(proj, 0, 0.1f, 100.0f)
+                frame.camera.getViewMatrix(view, 0)
+                android.opengl.Matrix.multiplyMM(mvp, 0, proj, 0, view, 0)
+
+                val drawLimit = pointBuffer?.limit() ?: 0
+                if (drawLimit > 0) {
+                    renderer?.drawPoints(pointBuffer!!, mvp, 40.0f)
+                }
+                pointCloud.release()
+            }
+
+            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            status
         } catch (e: Exception) {
-            Log.e(TAG, "Error checking tracking status: ${e.message}")
-            "OFFLINE"
+            Log.e(TAG, "Render Error", e)
+            "ERROR: ${e.javaClass.simpleName}"
         }
     }
 
-    fun pauseSession() {
-        try {
-            arSession?.pause()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error pausing ARCore session", e)
+    private fun accumulatePoints(incoming: FloatBuffer) {
+        val incomingCount = incoming.remaining() / 4
+        pointBuffer?.let { buf ->
+            buf.limit(buf.capacity()) // Reset limit to capacity for writing
+            val remainingSpace = maxPoints - currentPointCount
+            if (remainingSpace > 0) {
+                val toAdd = minOf(incomingCount, remainingSpace)
+                buf.position(currentPointCount * 4)
+                
+                // Use a duplicate to avoid modifying incoming buffer state
+                val dup = incoming.duplicate()
+                dup.limit(dup.position() + toAdd * 4)
+                buf.put(dup)
+                
+                currentPointCount += toAdd
+                buf.limit(currentPointCount * 4)
+            }
         }
+    }
+
+    fun clearBuffer() {
+        currentPointCount = 0
+        pointBuffer?.clear()
+        pointBuffer?.limit(0)
     }
 
     fun closeSession() {
@@ -136,86 +232,30 @@ class AnchorEngine(private val context: Context) {
             arSession?.close()
             arSession = null
             anchors.clear()
-            
-            if (dummyTextureId != -1) {
-                ensureGlContext()
-                GLES20.glDeleteTextures(1, intArrayOf(dummyTextureId), 0)
-                dummyTextureId = -1
-            }
-            
             if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
                 EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
                 EGL14.eglDestroySurface(eglDisplay, eglSurface)
                 EGL14.eglDestroyContext(eglDisplay, eglContext)
                 EGL14.eglTerminate(eglDisplay)
                 eglDisplay = EGL14.EGL_NO_DISPLAY
-                eglContext = EGL14.EGL_NO_CONTEXT
-                eglSurface = EGL14.EGL_NO_SURFACE
             }
-            
-            Log.d(TAG, "ARCore Session and GL resources closed.")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing ARCore session", e)
-        }
+        } catch (e: Exception) { Log.e(TAG, "Cleanup Error", e) }
     }
 
-    fun createAnchorAtCurrentPose(): Anchor? {
-        val session = arSession ?: return null
-        return try {
-            ensureGlContext()
-            val frame = session.update()
-            if (frame.camera.trackingState == TrackingState.TRACKING) {
-                val anchor = session.createAnchor(frame.camera.pose)
-                anchors.add(anchor)
-                Log.d(TAG, "Anchor created at pose: ${frame.camera.pose}")
-                anchor
-            } else {
-                Log.w(TAG, "Failed to create anchor: Camera is not tracking (State: ${frame.camera.trackingState})")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create anchor", e)
-            null
-        }
-    }
+    fun getTrackingStatus(): String = arSession?.update()?.camera?.trackingState?.name ?: "OFF"
 
     fun exportPointCloudToPly(projectName: String): File? {
-        val session = arSession ?: return null
-        return try {
-            ensureGlContext()
-            val frame = session.update()
-            val pointCloud = frame.acquirePointCloud()
-            val file = File(context.filesDir, "${projectName}_cloud.ply")
-            
+        val file = File(context.filesDir, "${projectName}_cloud.ply")
+        try {
             FileOutputStream(file).use { fos ->
-                val points = pointCloud.points
-                val numPoints = points.remaining() / 4
-                
-                val header = "ply\n" +
-                        "format ascii 1.0\n" +
-                        "element vertex $numPoints\n" +
-                        "property float x\n" +
-                        "property float y\n" +
-                        "property float z\n" +
-                        "property float confidence\n" +
-                        "end_header\n"
-                
-                fos.write(header.toByteArray())
-                
-                while (points.hasRemaining()) {
-                    val x = points.get()
-                    val y = points.get()
-                    val z = points.get()
-                    val confidence = points.get()
-                    fos.write("$x $y $z $confidence\n".toByteArray())
+                fos.write("ply\nformat ascii 1.0\nelement vertex $currentPointCount\nproperty float x\nproperty float y\nproperty float z\nproperty float confidence\nend_header\n".toByteArray())
+                val buf = pointBuffer?.duplicate() ?: return null
+                buf.position(0)
+                for (i in 0 until currentPointCount) {
+                    fos.write("${buf.get()} ${buf.get()} ${buf.get()} ${buf.get()}\n".toByteArray())
                 }
             }
-            pointCloud.release()
-            Log.d(TAG, "Exported point cloud to ${file.absolutePath}")
-            file
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to export point cloud", e)
-            null
-        }
+            return file
+        } catch (e: Exception) { return null }
     }
 }

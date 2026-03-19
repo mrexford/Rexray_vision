@@ -22,6 +22,7 @@ class PrimaryControlsFragment : Fragment() {
         fun onAnalyzeScene()
         fun onStopServer()
         fun onRegenerateCameraName()
+        fun onSaveAndReset()
         fun setIso(value: Int)
         fun setShutterSpeed(value: Long)
         fun setCaptureRate(value: Int)
@@ -37,6 +38,7 @@ class PrimaryControlsFragment : Fragment() {
     private lateinit var newProjectButton: Button
     private lateinit var armButton: Button
     private lateinit var captureButton: Button
+    private lateinit var saveResetButton: Button
     private lateinit var analyzeSceneButton: Button
     private lateinit var stopServerButton: Button
     private lateinit var isoSeekBar: SeekBar
@@ -65,6 +67,7 @@ class PrimaryControlsFragment : Fragment() {
     private var isCapturing = false
 
     private val shutterSpeeds = (200..1200 step 50).map { 1_000_000_000L / it }.toTypedArray()
+    private val MIN_FPS = 3
 
     override fun onAttach(context: Context) {
         super.onAttach(context)
@@ -84,6 +87,7 @@ class PrimaryControlsFragment : Fragment() {
         newProjectButton = view.findViewById(R.id.newProjectButton)
         armButton = view.findViewById(R.id.armButton)
         captureButton = view.findViewById(R.id.captureButton)
+        saveResetButton = view.findViewById(R.id.saveResetButton)
         analyzeSceneButton = view.findViewById(R.id.analyzeSceneButton)
         stopServerButton = view.findViewById(R.id.stopServerButton)
         isoSeekBar = view.findViewById(R.id.isoSeekBar)
@@ -124,8 +128,11 @@ class PrimaryControlsFragment : Fragment() {
         isoSeekBar.min = 50
         isoSeekBar.max = 1000
         shutterSpeedSeekBar.max = shutterSpeeds.size - 1
-        captureRateSeekBar.min = 3
-        captureRateSeekBar.max = 15
+        
+        // Use 0-based seekbar for wider compatibility and manually offset in code
+        captureRateSeekBar.min = 0
+        captureRateSeekBar.max = 15 - MIN_FPS
+        
         captureLimitSeekBar.min = 1
         captureLimitSeekBar.max = 300
     }
@@ -147,13 +154,17 @@ class PrimaryControlsFragment : Fragment() {
                 listener?.onStartCapture()
             }
         }
+        saveResetButton.setOnClickListener { listener?.onSaveAndReset() }
         analyzeSceneButton.setOnClickListener { listener?.onAnalyzeScene() }
         stopServerButton.setOnClickListener { listener?.onStopServer() }
         closeAppButton.setOnClickListener { listener?.onCloseApp() }
 
         isoSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) listener?.setIso(progress)
+                if (fromUser) {
+                    isoValueTextView.text = getString(R.string.iso_value_format, progress)
+                    listener?.setIso(progress)
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar) {}
             override fun onStopTrackingTouch(seekBar: SeekBar) {}
@@ -161,7 +172,11 @@ class PrimaryControlsFragment : Fragment() {
 
         shutterSpeedSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) listener?.setShutterSpeed(shutterSpeeds[progress])
+                if (fromUser) {
+                    val inv = 1_000_000_000.0 / shutterSpeeds[progress]
+                    shutterSpeedValueTextView.text = getString(R.string.shutter_speed_value_format, inv.toLong())
+                    listener?.setShutterSpeed(shutterSpeeds[progress])
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar) {}
             override fun onStopTrackingTouch(seekBar: SeekBar) {}
@@ -169,7 +184,11 @@ class PrimaryControlsFragment : Fragment() {
 
         captureRateSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) listener?.setCaptureRate(progress)
+                if (fromUser) {
+                    val fps = progress + MIN_FPS
+                    captureRateValueTextView.text = getString(R.string.capture_rate_format, fps)
+                    listener?.setCaptureRate(fps)
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar) {}
             override fun onStopTrackingTouch(seekBar: SeekBar) {}
@@ -177,7 +196,10 @@ class PrimaryControlsFragment : Fragment() {
 
         captureLimitSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) listener?.setCaptureLimit(progress)
+                if (fromUser) {
+                    captureLimitValueTextView.text = getString(R.string.capture_limit_format, progress)
+                    listener?.setCaptureLimit(progress)
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar) {}
             override fun onStopTrackingTouch(seekBar: SeekBar) {}
@@ -241,7 +263,7 @@ class PrimaryControlsFragment : Fragment() {
             shutterSpeedSeekBar.progress = if (shutterSpeedIndex != -1) shutterSpeedIndex else 0
 
             captureRateValueTextView.text = getString(R.string.capture_rate_format, it.getCaptureRate())
-            captureRateSeekBar.progress = it.getCaptureRate()
+            captureRateSeekBar.progress = it.getCaptureRate() - MIN_FPS
 
             captureLimitValueTextView.text = getString(R.string.capture_limit_format, it.getCaptureLimit())
             captureLimitSeekBar.progress = it.getCaptureLimit()
@@ -269,6 +291,14 @@ class PrimaryControlsFragment : Fragment() {
             captureButton.text = if (isCapturing) "Stop" else "Capture"
             captureCounter.visibility = if (isCapturing || captureCounter.text.toString().toIntOrNull() ?: 0 > 0) View.VISIBLE else View.INVISIBLE
             armButton.isEnabled = !isCapturing
+        }
+    }
+    
+    fun showReviewUI(visible: Boolean) {
+        activity?.runOnUiThread {
+            saveResetButton.visibility = if (visible) View.VISIBLE else View.GONE
+            captureButton.isEnabled = !visible
+            armButton.isEnabled = !visible
         }
     }
 

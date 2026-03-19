@@ -13,9 +13,13 @@ import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updateLayoutParams
 import androidx.lifecycle.lifecycleScope
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
@@ -25,6 +29,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.util.UUID
 
 class CaptureActivity : AppCompatActivity(), 
@@ -46,6 +51,7 @@ class CaptureActivity : AppCompatActivity(),
     private var networkStateJob: Job? = null
     private var migrationStateJob: Job? = null
     private var captureSafetyJob: Job? = null
+    private var renderJob: Job? = null
 
     private lateinit var currentProjectName: String
     private lateinit var cameraName: String
@@ -59,6 +65,8 @@ class CaptureActivity : AppCompatActivity(),
     
     private lateinit var arcoreSurfaceView: SurfaceView
     private lateinit var arStatusText: TextView
+
+    private var isSurfaceAvailable = false
 
     // Core Components
     private lateinit var workflowManager: WorkflowManager
@@ -125,6 +133,15 @@ class CaptureActivity : AppCompatActivity(),
         arcoreSurfaceView = findViewById(R.id.arcoreSurfaceView)
         arStatusText = findViewById(R.id.arStatusText)
 
+        // Robust Inset Handling to protect from notification bar overlap
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.statusOverlayContainer)) { view, insets ->
+            val statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
+            view.updateLayoutParams<ViewGroup.MarginLayoutParams> {
+                topMargin = statusBars.top
+            }
+            insets
+        }
+
         sharedPreferences = getSharedPreferences("RexrayVisionPrefs", Context.MODE_PRIVATE)
         
         workflowManager = WorkflowManager(this)
@@ -157,9 +174,32 @@ class CaptureActivity : AppCompatActivity(),
         }
         
         arcoreSurfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {}
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-            override fun surfaceDestroyed(holder: SurfaceHolder) {}
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                Log.d(tag, "ARCore Surface Created")
+                isSurfaceAvailable = true
+                
+                val rotation = windowManager.defaultDisplay.rotation
+                val w = if (arcoreSurfaceView.width > 0) arcoreSurfaceView.width else 1080
+                val h = if (arcoreSurfaceView.height > 0) arcoreSurfaceView.height else 2400
+                anchorEngine?.onSurfaceChanged(w, h, rotation)
+                
+                if (getIsArmed() && role == "PRIMARY") {
+                    anchorEngine?.initializeSession(holder)
+                    startRenderLoop()
+                }
+            }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                if (width > 0 && height > 0) {
+                    Log.d(tag, "ARCore Surface Changed: $width x $height")
+                    val rotation = windowManager.defaultDisplay.rotation
+                    anchorEngine?.onSurfaceChanged(width, height, rotation)
+                }
+            }
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                Log.d(tag, "ARCore Surface Destroyed")
+                isSurfaceAvailable = false
+                stopRenderLoop()
+            }
         })
     }
 
@@ -210,10 +250,10 @@ class CaptureActivity : AppCompatActivity(),
             }
 
             launch {
-                combine(ns.iso, ns.shutterSpeed, ns.projectName) { iso, shutter, project ->
-                    Triple(iso, shutter, project)
-                }.collectLatest { (_, _, project) ->
-                    currentProjectName = project
+                combine(ns.iso, ns.shutterSpeed, ns.captureRate, ns.captureLimit, ns.projectName) { _, _, _, _, _ ->
+                    Unit
+                }.collectLatest {
+                    currentProjectName = ns.projectName.value
                     updatePreview()
                     runOnUiThread { updateUi() }
                 }
@@ -231,7 +271,11 @@ class CaptureActivity : AppCompatActivity(),
                                     arcoreSurfaceView.visibility = View.VISIBLE
                                     arStatusText.visibility = View.VISIBLE
                                 }
-                                anchorEngine?.initializeSession()
+                                if (isSurfaceAvailable) {
+                                    anchorEngine?.setMode(AnchorEngine.CloudMode.STREAMING)
+                                    anchorEngine?.initializeSession(arcoreSurfaceView.holder)
+                                    startRenderLoop()
+                                }
                             } else if (role == "CLIENT") {
                                 val targets = getMappedPhysicalIds()
                                 dualCameraManager?.openAndSetupBurst(targets)
@@ -239,6 +283,7 @@ class CaptureActivity : AppCompatActivity(),
                         }
                     } else {
                         workflowManager.transitionToDisarmed {
+                            stopRenderLoop()
                             imuPacketizer.stopLogging()
                             if (role == "PRIMARY") {
                                 runOnUiThread {
@@ -282,18 +327,27 @@ class CaptureActivity : AppCompatActivity(),
                         }
                     }
                 }
-
-                launch {
-                    while(true) {
-                        if (getIsArmed()) {
-                            val status = try { anchorEngine?.getTrackingStatus() ?: "OFF" } catch(e: Exception) { "ERROR" }
-                            runOnUiThread { arStatusText.text = "AR SCANNING: $status" }
-                        }
-                        delay(1000)
-                    }
-                }
             }
         }
+    }
+
+    private fun startRenderLoop() {
+        renderJob?.cancel()
+        renderJob = lifecycleScope.launch {
+            while (isActive) {
+                val stats = anchorEngine?.updateAndRender() ?: "OFF"
+                val points = anchorEngine?.getPointCount() ?: 0
+                runOnUiThread { 
+                    arStatusText.text = "AR SCANNING: $stats | Pts: $points" 
+                }
+                delay(16)
+            }
+        }
+    }
+
+    private fun stopRenderLoop() {
+        renderJob?.cancel()
+        renderJob = null
     }
 
     private fun getMappedPhysicalIds(): List<Pair<String, String?>> {
@@ -474,17 +528,17 @@ class CaptureActivity : AppCompatActivity(),
                 }
             }
 
-            // Start Safety Timeout
             captureSafetyJob?.cancel()
             captureSafetyJob = lifecycleScope.launch {
                 val expectedSeconds = (getCaptureLimit() / getCaptureRate())
-                val safetyBuffer = 3000L // 3 seconds grace
+                val safetyBuffer = 5000L 
                 delay((expectedSeconds * 1000L) + safetyBuffer)
                 Log.w(tag, "Capture safety timeout reached. Aborting capture.")
                 executeStopCapture(false)
             }
 
             if (role == "PRIMARY") {
+                anchorEngine?.setMode(AnchorEngine.CloudMode.ACCUMULATING)
                 if (!isNetworkTriggered) {
                     networkService?.broadcastMessage(NetworkService.Message.StartCapture(UUID.randomUUID().toString()))
                 }
@@ -504,26 +558,42 @@ class CaptureActivity : AppCompatActivity(),
             captureInProgressBorder.visibility = View.GONE 
             if (role == "PRIMARY") {
                 (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.updateCaptureState(false)
+                (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.showReviewUI(true)
             }
-            showLoading("Processing metadata...")
+            showLoading("Finalizing Scan...")
         }
         
         lifecycleScope.launch {
             if (role == "PRIMARY") {
+                anchorEngine?.setMode(AnchorEngine.CloudMode.REVIEW)
                 if (!isNetworkTriggered) {
                     networkService?.broadcastMessage(NetworkService.Message.StopCapture(UUID.randomUUID().toString()))
                 }
                 (supportFragmentManager.findFragmentById(R.id.baseCaptureFragmentContainer) as? BaseCaptureFragment)?.stopBurstCapture()
-
+                
                 imuPacketizer.exportToCsv(currentProjectName)
-                anchorEngine?.exportPointCloudToPly(currentProjectName)
-                startMigrationService()
-                onDisarmCapture(true)
             } else if (role == "CLIENT") {
                 dualCameraManager?.stopBurst()
                 imuPacketizer.exportToCsv(currentProjectName)
                 generateXmpSidecars()
                 startMigrationService()
+            }
+            runOnUiThread { hideLoading() }
+        }
+    }
+
+    override fun onSaveAndReset() {
+        showLoading("Saving data...")
+        lifecycleScope.launch {
+            if (role == "PRIMARY") {
+                anchorEngine?.exportPointCloudToPly(currentProjectName)
+                startMigrationService()
+                anchorEngine?.clearBuffer()
+                anchorEngine?.setMode(AnchorEngine.CloudMode.STREAMING)
+                runOnUiThread {
+                    (supportFragmentManager.findFragmentById(R.id.controlsFragmentContainer) as? PrimaryControlsFragment)?.showReviewUI(false)
+                }
+                onDisarmCapture(true)
             }
             runOnUiThread { hideLoading() }
         }
