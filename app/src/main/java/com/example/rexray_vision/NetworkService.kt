@@ -77,7 +77,7 @@ class NetworkService : Service() {
     private val _captureRate = MutableStateFlow(15)
     val captureRate = _captureRate.asStateFlow()
 
-    private val _captureLimit = MutableStateFlow(30)
+    private val _captureLimit = MutableStateFlow(60)
     val captureLimit = _captureLimit.asStateFlow()
 
     private val _projectName = MutableStateFlow("DefaultProject")

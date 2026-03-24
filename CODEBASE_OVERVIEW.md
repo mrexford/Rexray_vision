@@ -11,11 +11,11 @@ The project is a standard Android application with a single `:app` module.
 *   **`NetworkService`**: **The System Source of Truth.** A persistent foreground service maintaining the PTP-like synchronization master/node status and global session parameters.
     *   **`TimeSyncEngine`**: Calculates microsecond-level clock offsets between Brain and Nodes.
     *   **`NetworkTimeProvider`**: UDP-based synchronization engine for RTT compensation.
-*   **`CaptureActivity`**: The central coordinator for the "Calibration Flip". It manages the transition between setup and high-speed capture.
+*   **`CaptureActivity`**: The central coordinator for the "Calibration Flip". It manages the transition between setup and high-speed capture. Orchestrates ARCore warmup and synchronized 16-bit depth sampling.
 *   **`WorkflowManager`**: Implements the state machine for `ARMED` and `DISARMED` system states.
 *   **`DualCameraManager`**: A high-performance engine for simultaneous physical camera capture, bypassing the standard Android camera preview pipeline for microsecond precision.
 *   **`InternalStorageManager`**: Manages low-latency I/O to the app's internal filesystem to avoid `MediaStore` thumbnailing overhead during burst capture.
-*   **`AnchorEngine`**: ARCore-based engine for establishing spatial anchors and exporting point clouds in `.ply` format.
+*   **`AnchorEngine`**: Transitioned to **High-Density Raw Depth acquisition**. Configured for `RAW_DEPTH_ONLY`. Handles asynchronous 16-bit buffer I/O and depth-to-still synchronization ratios.
 *   **`ImuPacketizer`**: High-frequency (200Hz+) inertial sensor logger for temporal sensor fusion.
 *   **`MetadataPacker`**: Injects PTP-synchronized timestamps into JPEG EXIF `UserComment` headers.
 *   **`OffloadWorker`**: A background task that packages images, IMU data, and spatial point clouds into a single session ZIP for offloading.
@@ -32,5 +32,5 @@ The project is a standard Android application with a single `:app` module.
 
 *   **Calibration Flip**: The system explicitly tears down setup camera sessions to free up ISP bandwidth for ARCore and high-speed multi-lens capture during the "Armed" phase.
 *   **Monotonic Timing Backbone**: All sensor data (Camera, IMU, ARCore) is indexed using a shared monotonic clock synchronized via UDP to the Primary device.
-*   **I/O Isolation**: Using internal storage during capture and deferred migration to `MediaStore` ensures zero dropped frames at 15fps+ dual-streaming.
+*   **I/O Isolation**: Using internal storage during capture and deferred migration to `MediaStore` ensures zero dropped frames at 15fps+ dual-streaming. Dedicated `DepthIoThread` handles high-bandwidth 16-bit depth streams.
 *   **Service-Authoritative State**: The `NetworkService` remains the master authority for session state, persisting across UI lifecycle changes.

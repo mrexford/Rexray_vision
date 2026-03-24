@@ -105,24 +105,28 @@
             android:paddingVertical="8dp" />
 
         <TextView
-            android:id="@+id/captureRateValueTextView"
+            android:id="@+id/captureRateLabel"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:text="CAPTURE FPS"
             android:textColor="#FFFFFF"
-            tools:text="FPS: 5" />
+            android:textSize="12sp" />
 
-        <SeekBar
-            android:id="@+id/captureRateSeekBar"
+        <Spinner
+            android:id="@+id/captureRateSpinner"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingVertical="8dp" />
+            android:layout_marginTop="4dp"
+            android:backgroundTint="#FFFFFF"
+            android:entries="@array/fps_options" />
 
         <TextView
             android:id="@+id/captureLimitValueTextView"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
             android:textColor="#FFFFFF"
-            tools:text="LIMIT: 30" />
+            tools:text="LIMIT: 60" />
 
         <SeekBar
             android:id="@+id/captureLimitSeekBar"

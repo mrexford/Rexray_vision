@@ -8,12 +8,12 @@ import kotlinx.coroutines.flow.asStateFlow
 class WorkflowManager(private val context: Context) {
     private val TAG = "WorkflowManager"
 
-    enum class AppState { DISARMED, ARMING, ARMED, CAPTURING }
+    enum class AppState { DISARMED, ARMING, ARMED, CAPTURING, TEARDOWN }
     
     private val _currentState = MutableStateFlow(AppState.DISARMED)
     val currentState = _currentState.asStateFlow()
 
-    fun transitionToArmed(onTeardownComplete: () -> Unit) {
+    suspend fun transitionToArmed(onTeardownComplete: suspend () -> Unit) {
         _currentState.value = AppState.ARMING
         Log.i(TAG, "Transitioning to ARMED state. Tearing down setup camera...")
         
@@ -24,10 +24,13 @@ class WorkflowManager(private val context: Context) {
         Log.i(TAG, "System ARMED. ARCore/IMU initialized.")
     }
 
-    fun transitionToDisarmed(onSetupReady: () -> Unit) {
-        _currentState.value = AppState.DISARMED
-        Log.i(TAG, "Transitioning to DISARMED state. Restarting setup camera...")
+    suspend fun transitionToDisarmed(onSetupReady: suspend () -> Unit) {
+        _currentState.value = AppState.TEARDOWN
+        Log.i(TAG, "Transitioning to DISARMED state (TEARDOWN).")
         
         onSetupReady()
+        
+        _currentState.value = AppState.DISARMED
+        Log.i(TAG, "System DISARMED. Setup camera active.")
     }
 }

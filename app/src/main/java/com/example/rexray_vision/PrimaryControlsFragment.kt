@@ -23,6 +23,7 @@ class PrimaryControlsFragment : Fragment() {
         fun onStopServer()
         fun onRegenerateCameraName()
         fun onSaveAndReset()
+        fun onProjectNameChanged(name: String)
         fun setIso(value: Int)
         fun setShutterSpeed(value: Long)
         fun setCaptureRate(value: Int)
@@ -43,11 +44,10 @@ class PrimaryControlsFragment : Fragment() {
     private lateinit var stopServerButton: Button
     private lateinit var isoSeekBar: SeekBar
     private lateinit var shutterSpeedSeekBar: SeekBar
-    private lateinit var captureRateSeekBar: SeekBar
+    private lateinit var captureRateSpinner: Spinner
     private lateinit var captureLimitSeekBar: SeekBar
     private lateinit var isoValueTextView: TextView
     private lateinit var shutterSpeedValueTextView: TextView
-    private lateinit var captureRateValueTextView: TextView
     private lateinit var captureLimitValueTextView: TextView
     private lateinit var projectNameTextView: TextView
     private lateinit var cameraNameTextView: TextView
@@ -67,7 +67,7 @@ class PrimaryControlsFragment : Fragment() {
     private var isCapturing = false
 
     private val shutterSpeeds = (200..1200 step 50).map { 1_000_000_000L / it }.toTypedArray()
-    private val MIN_FPS = 3
+    private val fpsOptions = arrayOf(3, 6, 10, 15)
 
     override fun onAttach(context: Context) {
         super.onAttach(context)
@@ -92,11 +92,10 @@ class PrimaryControlsFragment : Fragment() {
         stopServerButton = view.findViewById(R.id.stopServerButton)
         isoSeekBar = view.findViewById(R.id.isoSeekBar)
         shutterSpeedSeekBar = view.findViewById(R.id.shutterSpeedSeekBar)
-        captureRateSeekBar = view.findViewById(R.id.captureRateSeekBar)
+        captureRateSpinner = view.findViewById(R.id.captureRateSpinner)
         captureLimitSeekBar = view.findViewById(R.id.captureLimitSeekBar)
         isoValueTextView = view.findViewById(R.id.isoValueTextView)
         shutterSpeedValueTextView = view.findViewById(R.id.shutterSpeedValueTextView)
-        captureRateValueTextView = view.findViewById(R.id.captureRateValueTextView)
         captureLimitValueTextView = view.findViewById(R.id.captureLimitValueTextView)
         projectNameTextView = view.findViewById(R.id.projectNameTextView)
         cameraNameTextView = view.findViewById(R.id.cameraNameTextView)
@@ -128,10 +127,6 @@ class PrimaryControlsFragment : Fragment() {
         isoSeekBar.min = 50
         isoSeekBar.max = 1000
         shutterSpeedSeekBar.max = shutterSpeeds.size - 1
-        
-        // Use 0-based seekbar for wider compatibility and manually offset in code
-        captureRateSeekBar.min = 0
-        captureRateSeekBar.max = 15 - MIN_FPS
         
         captureLimitSeekBar.min = 1
         captureLimitSeekBar.max = 300
@@ -182,17 +177,13 @@ class PrimaryControlsFragment : Fragment() {
             override fun onStopTrackingTouch(seekBar: SeekBar) {}
         })
 
-        captureRateSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                if (fromUser) {
-                    val fps = progress + MIN_FPS
-                    captureRateValueTextView.text = getString(R.string.capture_rate_format, fps)
-                    listener?.setCaptureRate(fps)
-                }
+        captureRateSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val fps = fpsOptions[position]
+                listener?.setCaptureRate(fps)
             }
-            override fun onStartTrackingTouch(seekBar: SeekBar) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar) {}
-        })
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
 
         captureLimitSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
@@ -262,8 +253,8 @@ class PrimaryControlsFragment : Fragment() {
             val shutterSpeedIndex = shutterSpeeds.indexOfFirst { speed -> speed <= it.getShutterSpeed() }
             shutterSpeedSeekBar.progress = if (shutterSpeedIndex != -1) shutterSpeedIndex else 0
 
-            captureRateValueTextView.text = getString(R.string.capture_rate_format, it.getCaptureRate())
-            captureRateSeekBar.progress = it.getCaptureRate() - MIN_FPS
+            val fpsIndex = fpsOptions.indexOf(it.getCaptureRate())
+            if (fpsIndex != -1) captureRateSpinner.setSelection(fpsIndex)
 
             captureLimitValueTextView.text = getString(R.string.capture_limit_format, it.getCaptureLimit())
             captureLimitSeekBar.progress = it.getCaptureLimit()
@@ -275,14 +266,26 @@ class PrimaryControlsFragment : Fragment() {
 
             projectNameTextView.text = getString(R.string.project_name_prefix, it.getProjectName())
             cameraNameTextView.text = getString(R.string.camera_name_prefix, it.getCameraName())
+            
+            updateArmingState(it.getIsArmed())
         }
     }
 
     fun updateArmingState(isArmed: Boolean) {
-        armButton.isEnabled = true
-        armButton.text = if (isArmed) "Disarm" else "Arm"
-        captureButton.isEnabled = isArmed
-        captureButton.alpha = if(isArmed) 1.0f else 0.5f
+        activity?.runOnUiThread {
+            armButton.isEnabled = true
+            armButton.text = if (isArmed) "Disarm" else "Arm"
+            captureButton.isEnabled = isArmed
+            captureButton.alpha = if(isArmed) 1.0f else 0.5f
+            
+            // New logic: disable settings seekbars when armed to prevent race conditions
+            isoSeekBar.isEnabled = !isArmed
+            shutterSpeedSeekBar.isEnabled = !isArmed
+            captureRateSpinner.isEnabled = !isArmed
+            captureLimitSeekBar.isEnabled = !isArmed
+            newProjectButton.isEnabled = !isArmed
+            analyzeSceneButton.isEnabled = !isArmed
+        }
     }
 
     fun updateCaptureState(isCapturing: Boolean) {

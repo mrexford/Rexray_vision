@@ -21,12 +21,13 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
@@ -116,15 +117,15 @@ class BaseCaptureFragment : Fragment() {
     private fun initializeResourcesAndSession(camera: CameraDevice) {
         val characteristics = cameraManager.getCameraCharacteristics(camera.id)
         val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.JPEG
-        
+
         if (mode == NetworkService.CaptureMode.RAW) {
             val configurationMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             val rawSize = configurationMap?.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)?.get(0)
-            
+
             if (rawSize != null) {
                 val bufferSize = (rawSize.width * rawSize.height * 2.5).toInt()
                 byteBufferPool = ByteBufferPool(bufferSize, 15)
-                
+
                 val dngWriterThreads = (activity as? CaptureActivity)?.getDngWriterThreads() ?: 1
                 imageSaver = ImageSaver(requireContext(), characteristics, byteBufferPool, {}, dngWriterThreads)
                 imageSaver.start()
@@ -145,6 +146,7 @@ class BaseCaptureFragment : Fragment() {
 
     private val textureListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(surface: android.graphics.SurfaceTexture, width: Int, height: Int) {
+            Log.d(tag, "onSurfaceTextureAvailable: $width x $height")
             checkPermissionsAndOpenCamera(width, height)
         }
 
@@ -153,7 +155,9 @@ class BaseCaptureFragment : Fragment() {
         }
 
         override fun onSurfaceTextureDestroyed(surface: android.graphics.SurfaceTexture): Boolean {
+            Log.d(tag, "Surface texture destroyed. Releasing preview surface.")
             previewSurface?.release()
+            previewSurface = null
             return true
         }
 
@@ -184,9 +188,11 @@ class BaseCaptureFragment : Fragment() {
         rexrayCameraManager = RexrayCameraManager(requireContext(), backgroundHandler)
         cameraExecutor = Executors.newSingleThreadExecutor()
         cameraSessionManager = CameraSessionManager(rexrayCameraManager, backgroundHandler, cameraExecutor)
-        
+
         lifecycleScope.launch {
             (activity as? CaptureActivity)?.networkService?.captureMode?.collectLatest { mode ->
+                if ((activity as? CaptureActivity)?.getIsArmed() == true) return@collectLatest
+
                 rexrayCameraManager.cameraDevice?.let { camera ->
                     cameraExecutor.execute {
                         cameraSessionManager.close()
@@ -219,7 +225,7 @@ class BaseCaptureFragment : Fragment() {
                 if (::rexrayCameraManager.isInitialized) {
                     rexrayCameraManager.closeCamera()
                 }
-                
+
                 if (::imageSaver.isInitialized) {
                     if (imageSaver.activeTaskCount.value == 0) {
                         imageSaver.stop()
@@ -233,8 +239,8 @@ class BaseCaptureFragment : Fragment() {
         }
     }
 
-    fun stopPreviewAndReleaseCamera() {
-        cameraExecutor.execute {
+    suspend fun stopPreviewAndReleaseCamera() {
+        withContext(Dispatchers.IO) {
             Log.d(tag, "Explicitly closing session and camera for arming state.")
             cameraSessionManager.close()
             if (::rexrayCameraManager.isInitialized) {
@@ -253,6 +259,8 @@ class BaseCaptureFragment : Fragment() {
     }
 
     fun startPreview() {
+        // Phase 2: If textureView is not available, textureListener will handle it.
+        // If it IS available but we were in TEARDOWN, we might need to force a refresh.
         if (textureView.isAvailable) {
             checkPermissionsAndOpenCamera(textureView.width, textureView.height)
         }
@@ -263,6 +271,8 @@ class BaseCaptureFragment : Fragment() {
     }
 
     private fun checkPermissionsAndOpenCamera(width: Int, height: Int) {
+        if ((activity as? CaptureActivity)?.getIsArmed() == true) return
+
         if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA_PERMISSION)
         } else {
@@ -271,9 +281,26 @@ class BaseCaptureFragment : Fragment() {
     }
 
     private fun createCameraPreviewSession() {
-        val texture = textureView.surfaceTexture ?: return
+        val texture = textureView.surfaceTexture ?: run {
+            Log.w(tag, "createCameraPreviewSession: Surface texture not available")
+            return
+        }
+
+        if ((activity as? CaptureActivity)?.getIsArmed() == true) {
+            Log.w(tag, "createCameraPreviewSession: App is ARMED, skipping session creation")
+            return
+        }
+
         rexrayCameraManager.previewSize?.let { texture.setDefaultBufferSize(it.width, it.height) }
+
+        // Phase 2: Ensure the surface is fresh and valid
+        previewSurface?.release()
         previewSurface = Surface(texture)
+
+        if (!previewSurface!!.isValid) {
+            Log.e(tag, "createCameraPreviewSession: Created surface is invalid")
+            return
+        }
 
         val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.JPEG
 
@@ -414,7 +441,7 @@ class BaseCaptureFragment : Fragment() {
         capturedImageCount.set(0)
         isAwaitingMigration.set(false)
         burstRotation = activity?.windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
-        
+
         val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.JPEG
         if (mode == NetworkService.CaptureMode.RAW) {
             captureStateHandler?.clear()
@@ -429,7 +456,13 @@ class BaseCaptureFragment : Fragment() {
                 }
             }
         }
-        previewSurface?.let { cameraSessionManager.startBurstCapture(iso, shutterSpeed, captureRate, captureCallback, it) }
+        previewSurface?.let { 
+            if (it.isValid) {
+                cameraSessionManager.startBurstCapture(iso, shutterSpeed, captureRate, captureCallback, it) 
+            } else {
+                Log.e(tag, "startBurstCapture: Preview surface is invalid")
+            }
+        }
         isCapturing.set(true)
     }
 
@@ -439,7 +472,7 @@ class BaseCaptureFragment : Fragment() {
             activity?.let {
                 cameraSessionManager.stopBurstAndResumePreview(it.getIso(), it.getShutterSpeed())
             }
-            
+
             val mode = (activity as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.JPEG
             if (mode == NetworkService.CaptureMode.RAW) {
                 captureStateHandler?.clear()
@@ -478,10 +511,10 @@ class BaseCaptureFragment : Fragment() {
                 val buffer = image.planes[0].buffer
                 val bytes = ByteArray(buffer.remaining())
                 buffer.get(bytes)
-                
+
                 imageSaver.saveJpeg(bytes, image.timestamp, burstRotation)
                 listener?.onImageCaptured()
-                
+
                 if (count == captureLimit) {
                     activity?.runOnUiThread {
                         listener?.onCaptureLimitReached()

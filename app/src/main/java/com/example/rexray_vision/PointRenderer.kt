@@ -3,6 +3,7 @@ package com.example.rexray_vision
 import android.content.Context
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.GLES30
 import android.util.Log
 import com.google.ar.core.Frame
 import java.nio.ByteBuffer
@@ -10,31 +11,60 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Handles rendering the ARCore camera feed and the accumulated point cloud.
- * Updated to fix inversion issues and improve UV transformation.
+ * Handles rendering the ARCore camera feed and Depth Map visualization.
+ * Transitioned from Point Cloud to 16-bit Raw Depth visualization with Confidence filtering.
  */
 class PointRenderer(context: Context) {
     private val TAG = "PointRenderer"
 
-    private val vertexShaderCode = """
+    private val depthVertexShaderCode = """
         attribute vec4 vPosition;
-        attribute float aConfidence;
-        uniform mat4 uMVPMatrix;
-        uniform float uPointSize;
-        varying float vConfidence;
+        attribute vec2 aTexCoord;
+        varying vec2 vTexCoord;
         void main() {
-            gl_Position = uMVPMatrix * vPosition;
-            gl_PointSize = uPointSize;
-            vConfidence = aConfidence;
+            gl_Position = vPosition;
+            vTexCoord = aTexCoord;
         }
     """.trimIndent()
 
-    private val fragmentShaderCode = """
+    private val depthFragmentShaderCode = """
         precision mediump float;
-        varying float vConfidence;
+        varying vec2 vTexCoord;
+        uniform sampler2D sTexture; 
+        uniform sampler2D sConfidence;
+        
         void main() {
-            // Bright Yellow for high visibility
-            gl_FragColor = vec4(1.0, 1.0, 0.0, 1.0);
+            // Check confidence if available. 
+            // 60% threshold: 0.6 * 255.0 = 153.0
+            float confidence = texture2D(sConfidence, vTexCoord).r * 255.0;
+            if (confidence < 153.0) {
+                discard;
+            }
+
+            // Sample from the 16-bit depth texture uploaded as GL_RG8.
+            // R contains the low byte, G contains the high byte.
+            vec4 rawDepth = texture2D(sTexture, vTexCoord);
+            
+            // Reconstruct 16-bit millimeter value.
+            float depthMm = (rawDepth.r * 255.0 + rawDepth.g * 255.0 * 256.0);
+            
+            // No data (0) or invalid should be transparent
+            if (depthMm <= 0.0 || depthMm >= 65530.0) {
+                gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+                return;
+            }
+            
+            // Map 200mm (0.2m) to 5000mm (5m) to 0.0 - 1.0 range
+            float normalizedDepth = clamp((depthMm - 200.0) / 4800.0, 0.0, 1.0);
+            
+            // Turbo-like colormap approximation
+            // Red (Near) -> Green -> Blue (Far)
+            vec3 color;
+            color.r = clamp(1.5 - abs(4.0 * normalizedDepth - 1.0), 0.0, 1.0);
+            color.g = clamp(1.5 - abs(4.0 * normalizedDepth - 2.0), 0.0, 1.0);
+            color.b = clamp(1.5 - abs(4.0 * normalizedDepth - 3.0), 0.0, 1.0);
+            
+            gl_FragColor = vec4(color, 0.75);
         }
     """.trimIndent()
 
@@ -58,11 +88,13 @@ class PointRenderer(context: Context) {
         }
     """.trimIndent()
 
-    private var program: Int = 0
     private var cameraProgram: Int = 0
+    private var depthProgram: Int = 0
     private var textureId: Int = -1
+    private var depthTextureId: Int = -1
+    private var confidenceTextureId: Int = -1
 
-    // Quad for camera rendering (Triangle Strip order)
+    // Quad for rendering (Triangle Strip order)
     private val quadCoords = floatArrayOf(
         -1.0f, -1.0f, 0.0f,
          1.0f, -1.0f, 0.0f,
@@ -70,7 +102,6 @@ class PointRenderer(context: Context) {
          1.0f,  1.0f, 0.0f
     )
     
-    // Initial UVs (Top-left origin, standard for many camera APIs)
     private val quadTexCoords = floatArrayOf(
         0.0f, 1.0f,
         1.0f, 1.0f,
@@ -83,17 +114,21 @@ class PointRenderer(context: Context) {
     private lateinit var transformedTexBuffer: FloatBuffer
 
     fun init() {
-        program = createProgram(vertexShaderCode, fragmentShaderCode)
         cameraProgram = createProgram(cameraVertexShaderCode, cameraFragmentShaderCode)
+        depthProgram = createProgram(depthVertexShaderCode, depthFragmentShaderCode)
 
-        val textures = IntArray(1)
-        GLES20.glGenTextures(1, textures, 0)
+        val textures = IntArray(3)
+        GLES20.glGenTextures(3, textures, 0)
         textureId = textures[0]
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        depthTextureId = textures[1]
+        confidenceTextureId = textures[2]
+
+        setupExternalTexture(textureId)
+        
+        // Depth Texture (Regular 2D)
+        setupDepthTexture(depthTextureId)
+        // Confidence Texture (Regular 2D)
+        setupDepthTexture(confidenceTextureId)
 
         quadBuffer = ByteBuffer.allocateDirect(quadCoords.size * 4).run {
             order(ByteOrder.nativeOrder())
@@ -111,7 +146,42 @@ class PointRenderer(context: Context) {
         checkGlError("init")
     }
 
+    private fun setupDepthTexture(id: Int) {
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+    }
+
+    private fun setupExternalTexture(id: Int) {
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, id)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+    }
+
     fun getTextureId() = textureId
+    fun getDepthTextureId() = depthTextureId
+
+    fun updateDepthTextures(width: Int, height: Int, depthBuffer: ByteBuffer, confidenceBuffer: ByteBuffer?) {
+        // Upload Depth Map
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depthTextureId)
+        GLES30.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES30.GL_RG8, width, height, 0,
+            GLES30.GL_RG, GLES20.GL_UNSIGNED_BYTE, depthBuffer
+        )
+
+        // Upload Confidence Map if available
+        confidenceBuffer?.let {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, confidenceTextureId)
+            GLES20.glTexImage2D(
+                GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE, width, height, 0,
+                GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, it
+            )
+        }
+    }
 
     fun drawCamera(frame: Frame) {
         if (cameraProgram == 0 || textureId == -1) return
@@ -119,7 +189,6 @@ class PointRenderer(context: Context) {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glDepthMask(false)
 
-        // ARCore transforms the UVs to handle rotation and aspect ratio correctly
         frame.transformDisplayUvCoords(quadTexBuffer, transformedTexBuffer)
 
         GLES20.glUseProgram(cameraProgram)
@@ -142,72 +211,68 @@ class PointRenderer(context: Context) {
 
         GLES20.glDisableVertexAttribArray(positionHandle)
         GLES20.glDisableVertexAttribArray(texCoordHandle)
-        
-        checkGlError("drawCamera")
     }
 
-    fun drawPoints(pointBuffer: FloatBuffer, mvpMatrix: FloatArray, pointSize: Float) {
-        val limit = pointBuffer.limit()
-        if (program == 0 || limit == 0) return
+    fun drawDepth(frame: Frame) {
+        if (depthProgram == 0 || depthTextureId == -1) return
 
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-        GLES20.glDepthMask(true)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
 
-        GLES20.glUseProgram(program)
-        val positionHandle = GLES20.glGetAttribLocation(program, "vPosition")
-        val mvpMatrixHandle = GLES20.glGetUniformLocation(program, "uMVPMatrix")
-        val pointSizeHandle = GLES20.glGetUniformLocation(program, "uPointSize")
+        frame.transformDisplayUvCoords(quadTexBuffer, transformedTexBuffer)
 
-        GLES20.glUniformMatrix4fv(mvpMatrixHandle, 1, false, mvpMatrix, 0)
-        GLES20.glUniform1f(pointSizeHandle, pointSize)
+        GLES20.glUseProgram(depthProgram)
+        val positionHandle = GLES20.glGetAttribLocation(depthProgram, "vPosition")
+        val texCoordHandle = GLES20.glGetAttribLocation(depthProgram, "aTexCoord")
+        val texSamplerHandle = GLES20.glGetUniformLocation(depthProgram, "sTexture")
+        val confSamplerHandle = GLES20.glGetUniformLocation(depthProgram, "sConfidence")
 
-        val posBuf = pointBuffer.duplicate()
-        posBuf.position(0)
         GLES20.glEnableVertexAttribArray(positionHandle)
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 16, posBuf)
+        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, quadBuffer)
 
-        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, limit / 4)
+        GLES20.glEnableVertexAttribArray(texCoordHandle)
+        transformedTexBuffer.position(0)
+        GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 0, transformedTexBuffer)
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, depthTextureId)
+        GLES20.glUniform1i(texSamplerHandle, 1)
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, confidenceTextureId)
+        GLES20.glUniform1i(confSamplerHandle, 2)
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
         GLES20.glDisableVertexAttribArray(positionHandle)
-        
-        checkGlError("drawPoints")
+        GLES20.glDisableVertexAttribArray(texCoordHandle)
+        GLES20.glDisable(GLES20.GL_BLEND)
     }
 
     private fun createProgram(vShader: String, fShader: String): Int {
         val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, vShader)
-        if (vertexShader == 0) return 0
         val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, fShader)
-        if (fragmentShader == 0) return 0
-
         val program = GLES20.glCreateProgram()
-        if (program != 0) {
-            GLES20.glAttachShader(program, vertexShader)
-            GLES20.glAttachShader(program, fragmentShader)
-            GLES20.glLinkProgram(program)
-            val linkStatus = IntArray(1)
-            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linkStatus, 0)
-            if (linkStatus[0] != GLES20.GL_TRUE) {
-                Log.e(TAG, "Link error: " + GLES20.glGetProgramInfoLog(program))
-                GLES20.glDeleteProgram(program)
-                return 0
-            }
-        }
+        GLES20.glAttachShader(program, vertexShader)
+        GLES20.glAttachShader(program, fragmentShader)
+        GLES20.glLinkProgram(program)
         return program
     }
 
     private fun loadShader(type: Int, shaderCode: String): Int {
         val shader = GLES20.glCreateShader(type)
-        if (shader != 0) {
-            GLES20.glShaderSource(shader, shaderCode)
-            GLES20.glCompileShader(shader)
-            val compiled = IntArray(1)
-            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0)
-            if (compiled[0] == 0) {
-                Log.e(TAG, "Shader error ($type): " + GLES20.glGetShaderInfoLog(shader))
-                GLES20.glDeleteShader(shader)
-                return 0
-            }
+        GLES20.glShaderSource(shader, shaderCode)
+        GLES20.glCompileShader(shader)
+        
+        val compileStatus = IntArray(1)
+        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compileStatus, 0)
+        if (compileStatus[0] == 0) {
+            val log = GLES20.glGetShaderInfoLog(shader)
+            Log.e(TAG, "Error compiling shader: $log")
+            GLES20.glDeleteShader(shader)
+            return 0
         }
+        
         return shader
     }
 

@@ -1,27 +1,34 @@
 package com.example.rexray_vision
 
 import android.content.Context
+import android.media.Image
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
 import android.opengl.GLES20
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Log
 import android.view.SurfaceHolder
 import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Session
+import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
+import com.google.ar.core.exceptions.NotYetAvailableException
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.nio.channels.FileChannel
 
 /**
  * AnchorEngine handles ARCore spatial mapping and real-time visualization.
- * Robust against buffer overflows and viewport geometry race conditions.
+ * Optimized for High-Density Raw Depth acquisition and visualization.
+ * Point Cloud accumulation has been removed in favor of direct 16-bit depth stream.
  */
 class AnchorEngine(private val context: Context) {
     private val TAG = "AnchorEngine"
@@ -37,21 +44,51 @@ class AnchorEngine(private val context: Context) {
     private var viewportHeight = 0
     private var displayRotation = 0
 
-    // Point Cloud Management
+    // Capture Management
     enum class CloudMode { STREAMING, ACCUMULATING, REVIEW }
     private var currentMode = CloudMode.STREAMING
     
-    private var pointBuffer: FloatBuffer? = null
-    private val maxPoints = 150000 
-    private var currentPointCount = 0
+    private var lastTrackingState: TrackingState? = null
+    private var lastFailureReason: TrackingFailureReason? = null
+
+    // Warmup Tracking
+    private var warmupStartTime: Long = 0
+    private val WARMUP_DURATION_MS = 3000L
+
+    // Depth Sampling
+    private var frameCounter = 0
+    private var samplingRatio = 2 // Default: 1 depth per 2 frames (15 FPS)
+
+    // Dedicated Depth I/O
+    private var depthIoThread: HandlerThread? = null
+    private var depthIoHandler: Handler? = null
+    private var outputDir: File? = null
+
+    // Configuration Fallback
+    private var consecutiveDepthErrors = 0
+    private val MAX_DEPTH_ERRORS = 10
+    private var useAutomaticDepthFallback = false // Strictly prioritizing RAW_DEPTH as requested
 
     fun onSurfaceChanged(width: Int, height: Int, rotation: Int = 0) {
         viewportWidth = width
         viewportHeight = height
         displayRotation = rotation
-        // Set geometry on session if it exists
         arSession?.setDisplayGeometry(displayRotation, viewportWidth, viewportHeight)
-        Log.d(TAG, "Dimensions cached: $width x $height, rot: $rotation")
+    }
+
+    fun setWarmupStart(time: Long) {
+        Log.d(TAG, "Warmup window started at $time")
+        warmupStartTime = time
+    }
+
+    fun isDepthWarmedUp(): Boolean {
+        if (warmupStartTime == 0L) return false
+        return (System.currentTimeMillis() - warmupStartTime) >= WARMUP_DURATION_MS
+    }
+
+    fun setSamplingRatio(ratio: Int) {
+        this.samplingRatio = ratio
+        Log.d(TAG, "Sampling ratio set to 1 depth per $ratio frames")
     }
 
     fun initializeSession(surfaceHolder: SurfaceHolder) {
@@ -63,35 +100,55 @@ class AnchorEngine(private val context: Context) {
             renderer?.init()
             
             arSession = Session(context)
-            val config = Config(arSession)
-            config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-            config.focusMode = Config.FocusMode.AUTO
-            config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+            configureSession()
             
-            if (arSession?.isDepthModeSupported(Config.DepthMode.AUTOMATIC) == true) {
-                config.depthMode = Config.DepthMode.AUTOMATIC
+            // Set only the camera texture. Depth will be uploaded manually.
+            renderer?.let { 
+                arSession?.setCameraTextureName(it.getTextureId())
             }
             
-            arSession?.configure(config)
-            renderer?.getTextureId()?.let { arSession?.setCameraTextureName(it) }
-            
-            // Ensure geometry is set before resume
             if (viewportWidth > 0 && viewportHeight > 0) {
                 arSession?.setDisplayGeometry(displayRotation, viewportWidth, viewportHeight)
             }
             
             arSession?.resume()
-            GLES20.glClearColor(0.2f, 0.2f, 0.2f, 1.0f)
             
-            pointBuffer = ByteBuffer.allocateDirect(maxPoints * 4 * 4).run {
-                order(ByteOrder.nativeOrder())
-                asFloatBuffer()
-            }
+            // Start Depth I/O Thread
+            depthIoThread = HandlerThread("DepthIO").also { it.start() }
+            depthIoHandler = Handler(depthIoThread!!.looper)
+            outputDir = File(context.filesDir, "burst_capture")
+            if (!outputDir!!.exists()) outputDir!!.mkdirs()
             
-            Log.d(TAG, "ARCore Session initialized and resumed.")
+            Log.d(TAG, "ARCore Session initialized.")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize ARCore session", e)
         }
+    }
+
+    private fun configureSession() {
+        val session = arSession ?: return
+        val config = Config(session)
+        config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
+        config.focusMode = Config.FocusMode.AUTO
+        
+        // Strictly prefer RAW_DEPTH_ONLY to avoid smoothing
+        val isRawSupported = session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)
+        val isAutoSupported = session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
+        
+        Log.i(TAG, "Depth Support: RAW=$isRawSupported, AUTO=$isAutoSupported")
+
+        if (isRawSupported) {
+            config.depthMode = Config.DepthMode.RAW_DEPTH_ONLY
+            Log.i(TAG, "Configuring depth: RAW_DEPTH_ONLY (Unsmoothed)")
+        } else if (isAutoSupported && useAutomaticDepthFallback) {
+            config.depthMode = Config.DepthMode.AUTOMATIC
+            Log.i(TAG, "Configuring depth: AUTOMATIC (Fallback, Smoothed)")
+        } else {
+            config.depthMode = Config.DepthMode.DISABLED
+            Log.e(TAG, "Requested depth mode not supported on this device")
+        }
+        
+        session.configure(config)
     }
 
     private fun initEGL(surfaceHolder: SurfaceHolder) {
@@ -100,7 +157,7 @@ class AnchorEngine(private val context: Context) {
         EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
 
         val configAttr = intArrayOf(
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT or 0x0040, // ES3 bit
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
@@ -115,7 +172,8 @@ class AnchorEngine(private val context: Context) {
         EGL14.eglChooseConfig(eglDisplay, configAttr, 0, configs, 0, 1, numConfigs, 0)
         val config = configs[0]
 
-        val contextAttr = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
+        // Request GLES 3.0 context for GL_RG8 support
+        val contextAttr = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE)
         eglContext = EGL14.eglCreateContext(eglDisplay, config, EGL14.EGL_NO_CONTEXT, contextAttr, 0)
         eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, config, surfaceHolder, null, 0)
         
@@ -128,13 +186,10 @@ class AnchorEngine(private val context: Context) {
         Log.d(TAG, "Mode Change -> $mode")
         currentMode = mode
         if (mode == CloudMode.ACCUMULATING) {
-            currentPointCount = 0
-            pointBuffer?.clear() 
-            pointBuffer?.limit(0)
+            frameCounter = 0
+            consecutiveDepthErrors = 0
         }
     }
-
-    fun getPointCount(): Int = currentPointCount
 
     fun updateAndRender(): String {
         val session = arSession ?: return "NOT_INITIALIZED"
@@ -142,54 +197,81 @@ class AnchorEngine(private val context: Context) {
 
         return try {
             EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
-            
-            // Re-assert geometry to fix ARCore internal width:0 warnings
             session.setDisplayGeometry(displayRotation, viewportWidth, viewportHeight)
+            
+            val frame = session.update()
+            val trackingState = frame.camera.trackingState
+            val failureReason = frame.camera.trackingFailureReason
+            
+            if (trackingState != lastTrackingState || failureReason != lastFailureReason) {
+                lastTrackingState = trackingState
+                lastFailureReason = failureReason
+            }
             
             GLES20.glViewport(0, 0, viewportWidth, viewportHeight)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
 
-            val frame = session.update()
-            val trackingState = frame.camera.trackingState
-            
-            // Pass the whole frame for proper UV transformation
+            // Render standard camera background
             renderer?.drawCamera(frame)
 
             var status = trackingState.name
 
             if (trackingState == TrackingState.TRACKING) {
-                val pointCloud = frame.acquirePointCloud()
-                val points = pointCloud.points
-                val incomingCount = points.remaining() / 4
-                
-                if (incomingCount < 10 && currentMode != CloudMode.REVIEW) status = "LOW_FEATURES"
-
-                when (currentMode) {
-                    CloudMode.STREAMING -> {
-                        pointBuffer?.clear()
-                        val toPut = minOf(incomingCount, maxPoints)
-                        points.limit(toPut * 4)
-                        pointBuffer?.put(points)
-                        pointBuffer?.flip()
+                // Manual depth acquisition and upload for visualization
+                try {
+                    val depthImage = if (session.config.depthMode == Config.DepthMode.AUTOMATIC) {
+                        frame.acquireDepthImage16Bits()
+                    } else {
+                        frame.acquireRawDepthImage16Bits()
                     }
-                    CloudMode.ACCUMULATING -> {
-                        accumulatePoints(points)
+                    
+                    // Acquire confidence for visualization filtering if in RAW mode
+                    var confidenceImage: Image? = null
+                    if (session.config.depthMode == Config.DepthMode.RAW_DEPTH_ONLY) {
+                        try {
+                            confidenceImage = frame.acquireRawDepthConfidenceImage()
+                        } catch (e: NotYetAvailableException) { /* Not available yet */ }
                     }
-                    CloudMode.REVIEW -> {}
+                    
+                    val depthBuffer = depthImage.planes[0].buffer
+                    val confidenceBuffer = confidenceImage?.planes?.get(0)?.buffer
+                    
+                    renderer?.updateDepthTextures(
+                        depthImage.width, depthImage.height, depthBuffer,
+                        confidenceBuffer
+                    )
+                    renderer?.drawDepth(frame)
+                    
+                    if (currentMode == CloudMode.ACCUMULATING && frameCounter % samplingRatio == 0) {
+                        // Ensure we have confidence if in RAW mode for saving
+                        val confToSave = if (session.config.depthMode == Config.DepthMode.RAW_DEPTH_ONLY) {
+                            confidenceImage ?: frame.acquireRawDepthConfidenceImage()
+                        } else {
+                            null
+                        }
+                        saveDepthFrameAsync(depthImage, confToSave, frame.camera.displayOrientedPose, frame.timestamp)
+                    } else {
+                        depthImage.close()
+                        confidenceImage?.close()
+                    }
+                    consecutiveDepthErrors = 0 
+                } catch (e: NotYetAvailableException) {
+                    // Normal hardware lag
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to acquire depth image: ${e.message}")
+                    consecutiveDepthErrors++
+                    if (consecutiveDepthErrors >= MAX_DEPTH_ERRORS && !useAutomaticDepthFallback) {
+                        Log.e(TAG, "Persistent depth errors. Forcing AUTOMATIC fallback.")
+                        useAutomaticDepthFallback = true
+                        configureSession()
+                    }
                 }
                 
-                val mvp = FloatArray(16)
-                val proj = FloatArray(16)
-                val view = FloatArray(16)
-                frame.camera.getProjectionMatrix(proj, 0, 0.1f, 100.0f)
-                frame.camera.getViewMatrix(view, 0)
-                android.opengl.Matrix.multiplyMM(mvp, 0, proj, 0, view, 0)
-
-                val drawLimit = pointBuffer?.limit() ?: 0
-                if (drawLimit > 0) {
-                    renderer?.drawPoints(pointBuffer!!, mvp, 40.0f)
+                if (currentMode == CloudMode.ACCUMULATING) {
+                    frameCounter++
                 }
-                pointCloud.release()
+            } else {
+                status = "PAUSED: $failureReason"
             }
 
             EGL14.eglSwapBuffers(eglDisplay, eglSurface)
@@ -200,30 +282,58 @@ class AnchorEngine(private val context: Context) {
         }
     }
 
-    private fun accumulatePoints(incoming: FloatBuffer) {
-        val incomingCount = incoming.remaining() / 4
-        pointBuffer?.let { buf ->
-            buf.limit(buf.capacity()) // Reset limit to capacity for writing
-            val remainingSpace = maxPoints - currentPointCount
-            if (remainingSpace > 0) {
-                val toAdd = minOf(incomingCount, remainingSpace)
-                buf.position(currentPointCount * 4)
+    private fun saveDepthFrameAsync(depthImage: Image, confidenceImage: Image?, pose: com.google.ar.core.Pose, timestamp: Long) {
+        val depthBuffer = depthImage.planes[0].buffer
+        val depthClone = ByteBuffer.allocateDirect(depthBuffer.remaining()).put(depthBuffer)
+        depthClone.flip()
+
+        var confidenceClone: ByteBuffer? = null
+        if (confidenceImage != null) {
+            val confBuffer = confidenceImage.planes[0].buffer
+            confidenceClone = ByteBuffer.allocateDirect(confBuffer.remaining()).put(confBuffer)
+            confidenceClone.flip()
+            confidenceImage.close()
+        }
+        depthImage.close()
+
+        depthIoHandler?.post {
+            try {
+                // Apply confidence filter to depth buffer to "remove" low-accuracy points
+                // 60% threshold = 153
+                if (confidenceClone != null) {
+                    val pixelCount = confidenceClone.remaining()
+                    for (i in 0 until pixelCount) {
+                        val conf = confidenceClone.get(i).toInt() and 0xFF
+                        if (conf < 153) {
+                            // Zero out the 16-bit depth value (2 bytes per pixel)
+                            depthClone.put(i * 2, 0)
+                            depthClone.put(i * 2 + 1, 0)
+                        }
+                    }
+                    depthClone.rewind()
+                }
+
+                val depthFile = File(outputDir, "depth_${timestamp}.raw")
+                val poseFile = File(outputDir, "pose_${timestamp}.txt")
+
+                FileOutputStream(depthFile).channel.use { it.write(depthClone) }
                 
-                // Use a duplicate to avoid modifying incoming buffer state
-                val dup = incoming.duplicate()
-                dup.limit(dup.position() + toAdd * 4)
-                buf.put(dup)
+                if (confidenceClone != null) {
+                    val confFile = File(outputDir, "conf_${timestamp}.raw")
+                    confidenceClone.rewind()
+                    FileOutputStream(confFile).channel.use { it.write(confidenceClone) }
+                }
                 
-                currentPointCount += toAdd
-                buf.limit(currentPointCount * 4)
+                FileOutputStream(poseFile).use { fos ->
+                    val poseData = "timestamp: $timestamp\n" +
+                                   "position: ${pose.tx()}, ${pose.ty()}, ${pose.tz()}\n" +
+                                   "rotation: ${pose.qx()}, ${pose.qy()}, ${pose.qz()}, ${pose.qw()}\n"
+                    fos.write(poseData.toByteArray())
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Depth IO Error", e)
             }
         }
-    }
-
-    fun clearBuffer() {
-        currentPointCount = 0
-        pointBuffer?.clear()
-        pointBuffer?.limit(0)
     }
 
     fun closeSession() {
@@ -232,9 +342,14 @@ class AnchorEngine(private val context: Context) {
             arSession?.close()
             arSession = null
             anchors.clear()
+            
+            depthIoThread?.quitSafely()
+            depthIoThread = null
+            depthIoHandler = null
+
             if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
                 EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                EGL14.eglDestroySurface(eglDisplay, eglSurface)
+                eglDestroySurfaceSafely()
                 EGL14.eglDestroyContext(eglDisplay, eglContext)
                 EGL14.eglTerminate(eglDisplay)
                 eglDisplay = EGL14.EGL_NO_DISPLAY
@@ -242,20 +357,12 @@ class AnchorEngine(private val context: Context) {
         } catch (e: Exception) { Log.e(TAG, "Cleanup Error", e) }
     }
 
-    fun getTrackingStatus(): String = arSession?.update()?.camera?.trackingState?.name ?: "OFF"
-
-    fun exportPointCloudToPly(projectName: String): File? {
-        val file = File(context.filesDir, "${projectName}_cloud.ply")
-        try {
-            FileOutputStream(file).use { fos ->
-                fos.write("ply\nformat ascii 1.0\nelement vertex $currentPointCount\nproperty float x\nproperty float y\nproperty float z\nproperty float confidence\nend_header\n".toByteArray())
-                val buf = pointBuffer?.duplicate() ?: return null
-                buf.position(0)
-                for (i in 0 until currentPointCount) {
-                    fos.write("${buf.get()} ${buf.get()} ${buf.get()} ${buf.get()}\n".toByteArray())
-                }
-            }
-            return file
-        } catch (e: Exception) { return null }
+    private fun eglDestroySurfaceSafely() {
+        if (eglSurface != EGL14.EGL_NO_SURFACE) {
+            EGL14.eglDestroySurface(eglDisplay, eglSurface)
+            eglSurface = EGL14.EGL_NO_SURFACE
+        }
     }
+
+    fun getTrackingStatus(): String = arSession?.update()?.camera?.trackingState?.name ?: "OFF"
 }

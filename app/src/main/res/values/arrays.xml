@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string-array name="fps_options">
+        <item>3</item>
+        <item>6</item>
+        <item>10</item>
+        <item>15</item>
+    </string-array>
     <string-array name="adjectives">
         <item>Aero</item>
         <item>Agile</item>

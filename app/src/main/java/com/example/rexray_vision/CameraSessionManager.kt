@@ -21,6 +21,11 @@ class CameraSessionManager(
 
     fun createSession(previewSurface: Surface, sessionStateCallback: CameraCaptureSession.StateCallback) {
         val cameraDevice = rexrayCameraManager.cameraDevice ?: return
+        if (!previewSurface.isValid) {
+            Log.w(tag, "createSession: Surface is invalid. Aborting.")
+            return
+        }
+
         try {
             previewRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(previewSurface)
@@ -47,6 +52,8 @@ class CameraSessionManager(
             cameraDevice.createCaptureSession(sessionConfig)
         } catch (e: CameraAccessException) {
             Log.e(tag, "Failed to create camera session", e)
+        } catch (e: IllegalArgumentException) {
+            Log.e(tag, "Failed to create camera session: Illegal argument (possibly abandoned surface)", e)
         }
     }
 
@@ -75,6 +82,8 @@ class CameraSessionManager(
             Log.w(tag, "updatePreview called before previewRequestBuilder was initialized. Ignoring.")
             return
         }
+        val session = cameraCaptureSession ?: return
+
         try {
             builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
             builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
@@ -95,14 +104,19 @@ class CameraSessionManager(
                 builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
             }
 
-            cameraCaptureSession?.setRepeatingRequest(builder.build(), null, backgroundHandler)
+            session.setRepeatingRequest(builder.build(), null, backgroundHandler)
         } catch (e: CameraAccessException) {
             Log.e(tag, "Failed to update preview", e)
+        } catch (e: IllegalStateException) {
+            Log.w(tag, "updatePreview: Session already closed.")
         }
     }
 
     fun startBurstCapture(iso: Int, shutterSpeed: Long, captureRate: Int, captureCallback: CameraCaptureSession.CaptureCallback, previewSurface: Surface) {
         val cameraDevice = rexrayCameraManager.cameraDevice ?: return
+        val session = cameraCaptureSession ?: return
+        if (!previewSurface.isValid) return
+
         try {
             val frameDuration = 1_000_000_000L / captureRate
             var effectiveShutterSpeed = shutterSpeed
@@ -145,14 +159,17 @@ class CameraSessionManager(
                 set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_HIGH_QUALITY)
                 set(CaptureRequest.DISTORTION_CORRECTION_MODE, CaptureRequest.DISTORTION_CORRECTION_MODE_OFF)
             }
-            cameraCaptureSession?.setRepeatingRequest(captureBuilder.build(), captureCallback, backgroundHandler)
+            session.setRepeatingRequest(captureBuilder.build(), captureCallback, backgroundHandler)
         } catch(e: CameraAccessException) {
             Log.e(tag, "Failed to start burst capture", e)
+        } catch (e: IllegalStateException) {
+            Log.w(tag, "startBurstCapture: Session already closed.")
         }
     }
 
     fun captureSingle(iso: Int, shutterSpeed: Long, callback: CameraCaptureSession.CaptureCallback) {
         val cameraDevice = rexrayCameraManager.cameraDevice ?: return
+        val session = cameraCaptureSession ?: return
         try {
             val captureBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(rexrayCameraManager.analysisImageReader.surface)
@@ -160,19 +177,24 @@ class CameraSessionManager(
                 set(CaptureRequest.SENSOR_SENSITIVITY, iso)
                 set(CaptureRequest.SENSOR_EXPOSURE_TIME, shutterSpeed)
             }
-            cameraCaptureSession?.capture(captureBuilder.build(), callback, backgroundHandler)
+            session.capture(captureBuilder.build(), callback, backgroundHandler)
         } catch(e: CameraAccessException) {
              Log.e(tag, "Failed to capture single frame for analysis", e)
+        } catch (e: IllegalStateException) {
+            Log.w(tag, "captureSingle: Session already closed.")
         }
     }
 
     fun stopBurstAndResumePreview(iso: Int, shutterSpeed: Long) {
+        val session = cameraCaptureSession ?: return
         try {
-            cameraCaptureSession?.abortCaptures()
-            cameraCaptureSession?.stopRepeating()
+            session.abortCaptures()
+            session.stopRepeating()
             updatePreview(iso, shutterSpeed)
         } catch (e: CameraAccessException) {
             Log.e(tag, "Error stopping burst capture", e)
+        } catch (e: IllegalStateException) {
+            Log.w(tag, "stopBurstAndResumePreview: Session already closed.")
         }
     }
 

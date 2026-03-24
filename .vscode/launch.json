@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch Rexray Vision on Pixel 6",
+            "type": "android",
+            "request": "launch",
+            "appPackage": "com.example.rexray_vision",
+            "appActivity": ".SetupActivity",
+            "deviceName": "Pixel 6",
+            "preLaunchTask": "gradle assembleDebug"
+        }
+    ]
+}

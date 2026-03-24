@@ -32,7 +32,7 @@ class RexrayCameraManager(val context: Context, private val backgroundHandler: H
         val cameraId = cameraManager.cameraIdList.getOrNull(0) ?: return
         val characteristics = cameraManager.getCameraCharacteristics(cameraId)
         val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return
-        
+
         // Mode detection for reader initialization
         val mode = (context as? CaptureActivity)?.getCaptureMode() ?: NetworkService.CaptureMode.RAW
 

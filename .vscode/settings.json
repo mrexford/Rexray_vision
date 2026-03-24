@@ -1,0 +1,5 @@
+{
+  "androidDevkit.projectName": "app",
+  "androidDevkit.packageName": "com.example.rexray_vision",
+  "androidDevkit.launcherActivity": ".SetupActivity"
+}
